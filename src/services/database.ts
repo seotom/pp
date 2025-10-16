@@ -1,3 +1,5 @@
+// src\services\database.ts
+
 import { getSupabaseServer } from "@/lib/supabase";
 
 type Category = "like" | "dislike" | "allergy";

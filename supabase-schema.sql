@@ -1,3 +1,5 @@
+-- supabase-schema.sql
+
 -- Supabase schema for Phase 2
 
 -- profiles table: one row per authenticated user

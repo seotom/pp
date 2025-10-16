@@ -1,3 +1,5 @@
+// src\lib\supabase.ts
+
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // Server-side Supabase client. Uses service role if available, otherwise anon key.

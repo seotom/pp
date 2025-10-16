@@ -1,3 +1,5 @@
+// src\services\canonicalization.ts
+
 export class CanonicalizationService {
   private map: Record<string, string> = {
     // овощи/фрукты
