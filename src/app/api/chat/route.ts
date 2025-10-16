@@ -6,41 +6,6 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Простой менеджер состояния диалога
-class DialogueState {
-  private steps = {
-    family: false,
-    budget: false,
-    preferences: false, 
-    allergies: false,
-    goals: false
-  };
-
-  updateFromMessage(message: string) {
-    const lower = message.toLowerCase();
-    
-    // Простые проверки что данные собраны
-    if (/\d+.*(лет|год|возраст)/.test(lower)) this.steps.family = true;
-    if (/(бюджет|руб|₽|цена|стоимость).*\d+/.test(lower)) this.steps.budget = true;
-    if (/(не люб|не ел|не ем|избега|не нравится)/.test(lower)) this.steps.preferences = true;
-    if (/(аллерг|не перенос|реакция)/.test(lower)) this.steps.allergies = true;
-    if (/(цель|хочу|хотел|желаю)/.test(lower)) this.steps.goals = true;
-  }
-
-  getNextStep(): string {
-    if (!this.steps.family) return "family";
-    if (!this.steps.budget) return "budget";
-    if (!this.steps.preferences) return "preferences";
-    if (!this.steps.allergies) return "allergies";
-    if (!this.steps.goals) return "goals";
-    return "complete";
-  }
-
-  isComplete(): boolean {
-    return Object.values(this.steps).every(Boolean);
-  }
-}
-
 // Простое извлечение структурированных данных
 async function extractBasicInfo(message: string, userId: string) {
   try {
@@ -627,13 +592,17 @@ export async function POST(req: NextRequest) {
 
     // Получаем системный промпт
     const systemPrompt = `
-      Ты - дружелюбный помощник по семейному питанию. 
+      Ты - дружелюбный и умный AI-помощник по семейному питанию. 
 
       ОСНОВНЫЕ ПРАВИЛА:
       1. Когда пользователь дает полные данные (семья, бюджет, предпочтения, аллергии, цели) - ПРЕДЛАГАЙ генерацию плана питания
       2. Если данных не хватает - вежливо запроси недостающее
       3. Подтверждай изменения простыми словами
       4. Понимай сложные конструкции ("раньше не любил, теперь люблю")
+      5. Отвечай ТОЛЬКО на вопросы по питанию, бюджету, шопинг-листам
+      6. НЕ давай медицинских рекомендаций и диагнозов
+      7. НЕ обсуждай политику, развлечения, технические детали
+      8. При off-topic запросах вежливо возвращай к теме питания
 
       КОГДА ПРЕДЛАГАТЬ ПЛАН ПИТАНИЯ:
       - Есть информация о семье (количество, возраст)
@@ -648,6 +617,16 @@ export async function POST(req: NextRequest) {
       - На полный сброс: "Отлично, начинаю с чистого листа!"
 
       Всегда будь краток, дружелюбен и точен.
+
+      КЛЮЧЕВЫЕ СООБЩЕНИЯ:
+      - Питаться правильно можно даже экономя
+      - Продуманный список покупок - основа здоровья семьи
+      - Покупайте с умом - не отказывайтесь от полезного
+
+      ИСТОЧНИКИ:
+      - Российские нормы питания (МР 2.3.1.0253-21)
+      - Данные о составе продуктов
+      - Усредненные цены российских магазинов
     `;
 
     const completion = await openai.chat.completions.create({
