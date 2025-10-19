@@ -22,6 +22,14 @@ const BASE_SYSTEM_PROMPT = `Ты - дружелюбный и умный AI-по�
       7. НЕ обсуждай политику, развлечения, технические детали
       8. При off-topic запросах вежливо возвращай к теме питания
 
+      СОБИРАЙ ДАННЫЕ ПО ШАГАМ ИЗ ВЫШЕУКАЗАННОГО СПИСКА:
+      - Шаг 1: узнай состав семьи (количество, имена или роли, возраст и вес каждого)
+      - Шаг 2: уточни недельный бюджет (в рублях)
+      - Шаг 3: собери любимые и нелюбимые продукты у каждого
+      - Шаг 4: собери пищевые аллергии
+      - Шаг 5: уточни цели питания
+      Не перескакивай через шаги и не перечисляй их все сразу — за один ответ запрашивай или подтверждай только следующий незаполненный шаг.
+
       КОГДА ПРЕДЛАГАТЬ ПЛАН ПИТАНИЯ:
       - Есть информация о семье (количество, возраст)
       - Известен бюджет
@@ -187,17 +195,42 @@ async function extractBasicInfo(message: string, userId: string) {
   try {
     const supabase = getSupabaseServer();
 
-    // 1️⃣ Получаем профиль
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('id, budget, goals')
-      .eq('user_id', userId)
-      .single();
+    // 1️⃣ Получаем профиль или создаём, если его ещё нет
+    let profile: SupabaseProfile | null = null;
+    const { data: profileData, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, budget, goals")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-    if (!profile) {
-      console.log('❌ Профиль не найден для user_id:', userId);
+    if (profileError) {
+      console.error("❌ Ошибка чтения профиля:", profileError);
       return;
     }
+
+    if (profileData) {
+      profile = profileData as SupabaseProfile;
+    } else {
+      const { data: insertedProfile, error: insertProfileError } = await supabase
+        .from("profiles")
+        .insert({ user_id: userId })
+        .select("id, budget, goals")
+        .maybeSingle();
+
+      if (insertProfileError || !insertedProfile) {
+        console.error("❌ Не удалось создать профиль пользователя:", insertProfileError);
+        return;
+      }
+
+      profile = insertedProfile as SupabaseProfile;
+    }
+
+    if (!profile) {
+      console.error("❌ Профиль пользователя остался неинициализированным");
+      return;
+    }
+
+    let profileRecord = profile as SupabaseProfile;
 
     // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
@@ -205,9 +238,19 @@ async function extractBasicInfo(message: string, userId: string) {
       messages: [
         {
           role: "system",
-          content: `Ты — парсер сообщений пользователя для AI-ассистента питания. 
+          content: `Ты — парсер сообщений пользователя для AI-ассистента питания.
           Верни СТРОГО JSON:
           {
+            "family_members": [
+              {
+                "name": string,
+                "age": number | null,
+                "weight": number | null,
+                "likes": string[] | [],
+                "dislikes": string[] | [],
+                "allergies": string[] | []
+              }
+            ],
             "budget": number | null,
             "goals": string[] | [],
             "updates_per_person": [
@@ -222,7 +265,7 @@ async function extractBasicInfo(message: string, userId: string) {
               }
             ]
           }
-          Никакого текста вне JSON.`
+          Если имен нет, используйте роли (мама, папа, ребенок 1). Если упомянуто, что данных нет, передай пустой массив. Никакого текста вне JSON.`
         },
         { role: "user", content: message }
       ],
@@ -234,6 +277,169 @@ async function extractBasicInfo(message: string, userId: string) {
     if (!raw) return console.log("AI не вернул данные");
 
     const data = JSON.parse(raw);
+
+    const normalizeArray = (value: unknown): string[] | null => {
+      if (!Array.isArray(value)) return null;
+      return value
+        .map((item) => {
+          if (typeof item === "string") return item.trim();
+          if (item == null) return "";
+          return String(item).trim();
+        })
+        .filter((item) => item.length > 0);
+    };
+
+    const toNumberOrNull = (value: unknown): number | null => {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string" && value.trim().length > 0) {
+        const numeric = Number(value.replace(/,/g, "."));
+        if (Number.isFinite(numeric)) return numeric;
+      }
+      return null;
+    };
+
+    const normalizeName = (value: string | undefined | null): string =>
+      typeof value === "string" ? value.trim() : "";
+
+    const memberMap = new Map<string, any>();
+    const { data: existingMembersRaw, error: existingMembersError } = await supabase
+      .from("family_members")
+      .select("id, name, age, weight, allergies, dislikes, likes")
+      .eq("profile_id", profileRecord.id);
+
+    if (existingMembersError) {
+      console.error("⚠️ Ошибка загрузки текущих членов семьи:", existingMembersError);
+    }
+
+    for (const member of existingMembersRaw || []) {
+      const key = normalizeName(member?.name).toLowerCase();
+      if (key) {
+        memberMap.set(key, member);
+      }
+    }
+
+    const ensureMemberRecord = async (rawName: string | undefined | null) => {
+      const trimmedName = normalizeName(rawName);
+      if (!trimmedName) return null;
+      const key = trimmedName.toLowerCase();
+      const cached = memberMap.get(key);
+      if (cached) return cached;
+
+      const { data: inserted, error: insertError } = await supabase
+        .from("family_members")
+        .insert({ profile_id: profileRecord.id, name: trimmedName })
+        .select("id, name, age, weight, allergies, dislikes, likes")
+        .maybeSingle();
+
+      if (insertError || !inserted) {
+        console.error(`❌ Не удалось создать запись члена семьи ${trimmedName}:`, insertError);
+        return null;
+      }
+
+      memberMap.set(key, inserted);
+      return inserted;
+    };
+
+    const applySnapshotToMember = async (snapshot: any) => {
+      const trimmedName = normalizeName(snapshot?.name);
+      if (!trimmedName) return;
+      const key = trimmedName.toLowerCase();
+      const age = toNumberOrNull(snapshot?.age);
+      const weight = toNumberOrNull(snapshot?.weight);
+      const likes = normalizeArray(snapshot?.likes);
+      const dislikes = normalizeArray(snapshot?.dislikes);
+      const allergies = normalizeArray(snapshot?.allergies);
+
+      const existing = memberMap.get(key);
+      if (existing) {
+        const updatePayload: Record<string, any> = {};
+        if ((existing.name || "").trim() !== trimmedName) updatePayload.name = trimmedName;
+        if (age !== null) updatePayload.age = age;
+        if (weight !== null) updatePayload.weight = weight;
+        if (likes !== null) updatePayload.likes = likes;
+        if (dislikes !== null) updatePayload.dislikes = dislikes;
+        if (allergies !== null) updatePayload.allergies = allergies;
+
+        if (Object.keys(updatePayload).length > 0) {
+          const { data: updated, error: updateError } = await supabase
+            .from("family_members")
+            .update(updatePayload)
+            .eq("id", existing.id)
+            .select("id, name, age, weight, allergies, dislikes, likes")
+            .maybeSingle();
+
+          if (updateError) {
+            console.error(`❌ Ошибка обновления данных ${trimmedName}:`, updateError);
+          } else if (updated) {
+            memberMap.set(key, updated);
+          }
+        }
+      } else {
+        const insertPayload: Record<string, any> = {
+          profile_id: profileRecord.id,
+          name: trimmedName,
+        };
+        if (age !== null) insertPayload.age = age;
+        if (weight !== null) insertPayload.weight = weight;
+        if (likes !== null) insertPayload.likes = likes;
+        if (dislikes !== null) insertPayload.dislikes = dislikes;
+        if (allergies !== null) insertPayload.allergies = allergies;
+
+        const { data: inserted, error: insertError } = await supabase
+          .from("family_members")
+          .insert(insertPayload)
+          .select("id, name, age, weight, allergies, dislikes, likes")
+          .maybeSingle();
+
+        if (insertError) {
+          console.error(`❌ Ошибка добавления нового члена семьи ${trimmedName}:`, insertError);
+        } else if (inserted) {
+          memberMap.set(key, inserted);
+        }
+      }
+    };
+
+    const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
+    for (const snapshot of rawSnapshots) {
+      await applySnapshotToMember(snapshot);
+    }
+
+    const candidateBudget = toNumberOrNull(data?.budget);
+    if (candidateBudget !== null) {
+      const normalizedBudget = Math.max(0, Math.round(candidateBudget));
+      const { error: budgetError } = await supabase
+        .from("profiles")
+        .update({ budget: normalizedBudget })
+        .eq("id", profileRecord.id);
+
+      if (budgetError) {
+        console.error("⚠️ Ошибка обновления бюджета:", budgetError);
+      } else {
+        profileRecord = { ...profileRecord, budget: normalizedBudget } as SupabaseProfile;
+      }
+    }
+
+    let goalsArray = normalizeArray(data?.goals);
+    if (!goalsArray && typeof data?.goals === 'string') {
+      goalsArray = normalizeArray(data.goals.split(/[;,]/));
+    }
+    if (goalsArray && goalsArray.length > 0) {
+      const goalsString = goalsArray.join(", ");
+      const { error: goalsError } = await supabase
+        .from("profiles")
+        .update({ goals: goalsString })
+        .eq("id", profileRecord.id);
+
+      if (goalsError) {
+        console.error("⚠️ Ошибка обновления целей:", goalsError);
+      } else {
+        profileRecord = { ...profileRecord, goals: goalsString } as SupabaseProfile;
+      }
+    }
+
+    const updatesPerPerson: any[] = Array.isArray(data?.updates_per_person)
+      ? [...data.updates_per_person]
+      : [];
 
     // 🧠 AI-driven интерпретация смысла "прошла аллергия"
     const intentPrompt = `
@@ -258,13 +464,12 @@ async function extractBasicInfo(message: string, userId: string) {
 
       if (allergyGoneFlag) {
         console.log('🧠 AI определил, что речь о прошедших аллергиях — добавляем remove_allergies=["все"]');
-        if (!data.updates_per_person || data.updates_per_person.length === 0) {
-          data.updates_per_person = [{ name: 'все', remove_allergies: ['все'] }];
+        if (updatesPerPerson.length === 0) {
+          updatesPerPerson.push({ name: 'все', remove_allergies: ['все'] });
         } else {
-          data.updates_per_person = data.updates_per_person.map((u: any) => ({
-            ...u,
-            remove_allergies: ['все']
-          }));
+          for (const entry of updatesPerPerson) {
+            entry.remove_allergies = ['все'];
+          }
         }
       }
     } catch (intentError) {
@@ -279,7 +484,7 @@ async function extractBasicInfo(message: string, userId: string) {
     // 🧠 Эвристика: если AI вернул "у нас / оба / мы" или имена-плейсхолдеры — применяем ко всем членам семьи
 
     const mentionsGroup =
-    (data.updates_per_person?.some((u: { name: any; }) =>
+    (updatesPerPerson.some((u: { name: any; }) =>
       ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
     )) || /у нас|оба|вместе|мы/i.test(message);
 
@@ -287,7 +492,7 @@ async function extractBasicInfo(message: string, userId: string) {
       const { data: allMembersRaw, error: listErr } = await supabase
         .from('family_members')
         .select('name')
-        .eq('profile_id', profile.id);
+        .eq('profile_id', profileRecord.id);
 
       // Нормализуем в массив, даже если null/undefined
       const allMembers = Array.isArray(allMembersRaw) ? allMembersRaw : [];
@@ -297,8 +502,8 @@ async function extractBasicInfo(message: string, userId: string) {
         console.log(`🔁 Распознано групповое выражение ("у нас/оба/мы") — применяем ко всем: ${memberNames.join(', ')}`);
 
         const expandedUpdates: any[] = [];
-        const source = Array.isArray(data.updates_per_person) && data.updates_per_person.length > 0
-          ? data.updates_per_person
+        const source = updatesPerPerson.length > 0
+          ? updatesPerPerson
           : [{}]; // если AI не прислал блок — просто размножим пустые операции (на случай других полей)
 
         for (const u of source) {
@@ -307,7 +512,7 @@ async function extractBasicInfo(message: string, userId: string) {
           }
         }
 
-        data.updates_per_person = expandedUpdates;
+        updatesPerPerson.splice(0, updatesPerPerson.length, ...expandedUpdates);
       } else {
         console.log('⚠️ Семейные участники не найдены — невозможно применить групповое обновление');
       }
@@ -316,8 +521,8 @@ async function extractBasicInfo(message: string, userId: string) {
     // 🧩 Если после этого в updates_per_person остались только "пользователь"/"партнер", без имён из БД
     // 🧩 Если после этого в updates_per_person остались только плейсхолдеры — ничего не меняем (лучше запросить уточнение в ответе чата)
     if (
-      data.updates_per_person?.length > 0 &&
-      data.updates_per_person.every((u: { name: any; }) =>
+      updatesPerPerson.length > 0 &&
+      updatesPerPerson.every((u: { name: any; }) =>
         ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
       )
     ) {
@@ -326,26 +531,28 @@ async function extractBasicInfo(message: string, userId: string) {
     }
 
     // 3️⃣ Применяем обновления из updates_per_person
-    if (data.updates_per_person?.length > 0) {
-      for (const update of data.updates_per_person) {
-        const { name, add_allergies = [], remove_allergies = [], add_dislikes = [], remove_dislikes = [], add_likes = [], remove_likes = [] } = update;
+    if (updatesPerPerson.length > 0) {
+      for (const update of updatesPerPerson) {
+        const {
+          name,
+          add_allergies = [],
+          remove_allergies = [],
+          add_dislikes = [],
+          remove_dislikes = [],
+          add_likes = [],
+          remove_likes = [],
+        } = update;
 
-        const { data: member } = await supabase
-          .from('family_members')
-          .select('id, allergies, dislikes, likes')
-          .eq('profile_id', profile.id)
-          .eq('name', name)
-          .single();
-
-        if (!member) {
-          console.log(`❌ Член семьи ${name} не найден`);
+        const memberRecord = await ensureMemberRecord(name);
+        if (!memberRecord) {
+          console.log(`❌ Член семьи ${name} не найден и не удалось создать запись`);
           continue;
         }
 
         const updated = {
-          allergies: [...(member.allergies || [])],
-          dislikes: [...(member.dislikes || [])],
-          likes: [...(member.likes || [])],
+          allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
+          dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
+          likes: [...(Array.isArray(memberRecord.likes) ? memberRecord.likes : [])],
         };
 
         // Добавления и удаления с автоматическим контролем взаимных связей
@@ -402,17 +609,25 @@ async function extractBasicInfo(message: string, userId: string) {
         updated.dislikes = [...new Set(updated.dislikes.filter(d => !updated.likes.includes(d) && !updated.allergies.includes(d)))];
         updated.likes = [...new Set(updated.likes.filter(l => !updated.dislikes.includes(l) && !updated.allergies.includes(l)))];
 
-        const { error } = await supabase
+        const { data: savedMember, error } = await supabase
           .from('family_members')
           .update({
             allergies: updated.allergies,
             dislikes: updated.dislikes,
             likes: updated.likes
           })
-          .eq('id', member.id);
+          .eq('id', memberRecord.id)
+          .select('id, name, age, weight, allergies, dislikes, likes')
+          .maybeSingle();
 
-        if (error) console.error(`Ошибка обновления ${name}:`, error);
-        else console.log(`✅ Обновлены данные для ${name}:`, updated);
+        if (error) {
+          console.error(`Ошибка обновления ${name}:`, error);
+        } else {
+          console.log(`✅ Обновлены данные для ${name}:`, updated);
+          if (savedMember) {
+            memberMap.set(normalizeName(savedMember.name).toLowerCase(), savedMember);
+          }
+        }
       }
     }
 
@@ -420,20 +635,22 @@ async function extractBasicInfo(message: string, userId: string) {
     const { data: familyMembers } = await supabase
       .from('family_members')
       .select('name, age, weight, allergies, dislikes, likes')
-      .eq('profile_id', profile.id);
+      .eq('profile_id', profileRecord.id);
 
     // 5️⃣ Формируем финальный ответ исключительно из БД
     let text = `Вот актуальная информация о вашей семье:\n\n`;
 
     for (const m of familyMembers || []) {
       text += `**${m.name}**\n`;
+      text += `- Возраст: ${typeof m.age === 'number' ? `${m.age} лет` : 'не указан'}\n`;
+      text += `- Вес: ${typeof m.weight === 'number' ? `${m.weight} кг` : 'не указан'}\n`;
       text += `- Любимые продукты: ${m.likes?.join(', ') || 'нет'}\n`;
       text += `- Нелюбимые продукты: ${m.dislikes?.join(', ') || 'нет'}\n`;
       text += `- Аллергии: ${m.allergies?.join(', ') || 'нет'}\n\n`;
     }
 
-    if (profile.budget) text += `**Бюджет:** ${profile.budget} руб.\n`;
-    if (profile.goals) text += `**Цели:** ${profile.goals}\n`;
+    if (profileRecord.budget) text += `**Бюджет:** ${profileRecord.budget} руб.\n`;
+    if (profileRecord.goals) text += `**Цели:** ${profileRecord.goals}\n`;
 
     // console.log("💬 Итоговый ответ сформирован из БД:", text);
 
