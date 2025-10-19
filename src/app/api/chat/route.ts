@@ -1,5 +1,7 @@
 // src\app\api\chat\route.ts
 
+// стабильный фикс
+
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getSupabaseServer } from "@/lib/supabase";
@@ -8,483 +10,297 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Простое извлечение структурированных данных
+// 🔹 Функция получения актуальных данных из Supabase
+async function getUserDataFromDB(user_id: string) {
+  const supabase = getSupabaseServer();
+
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("id, budget, goals")
+    .eq("user_id", user_id)
+    .single();
+
+  if (profileError || !profile) {
+    console.error("❌ Не удалось найти профиль пользователя:", profileError);
+    return null;
+  }
+
+  const { data: familyMembers, error: familyError } = await supabase
+    .from("family_members")
+    .select("name, age, weight, allergies, dislikes, likes")
+    .eq("profile_id", profile.id);
+
+  if (familyError) {
+    console.error("❌ Ошибка получения family_members:", familyError);
+  }
+
+  return {
+    profile,
+    family: familyMembers || [],
+  };
+}
+
+// 🔧 Функция синхронизированного анализа и возврата данных
 async function extractBasicInfo(message: string, userId: string) {
   try {
     const supabase = getSupabaseServer();
-    
-    // Ищем профиль пользователя
+
+    // 1️⃣ Получаем профиль
     const { data: profile } = await supabase
       .from('profiles')
-      .select('id')
+      .select('id, budget, goals')
       .eq('user_id', userId)
       .single();
 
     if (!profile) {
-      console.log('Профиль не найден для user_id:', userId);
+      console.log('❌ Профиль не найден для user_id:', userId);
       return;
     }
 
-    const prompt = `
-      Извлеки информацию из сообщения пользователя. Верни ТОЛЬКО JSON:
-      {
-        "budget": число или null,
-        "goals": массив строк или [],
-        "family": [
-          {"name": строка, "age": число, "allergies": [], "dislikes": [], "likes": []}
-        ],
-        "remove": {
-          "allergies": [],    // Аллергии для удаления
-          "dislikes": [],     // Нелюбимые для удаления  
-          "likes": []         // Любимые для удаления
-        },
-        "clear_all": boolean, // TRUE для "забудь всё", "очисти все предпочтения" - очищает ВСЕ предпочтения и аллергии
-        "clear_scope": "allergies" | "dislikes" | "likes" | null // для удаления конкретного типа
-      }
-      
-      Сообщение: "${message}"
-      
-      КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА ДЛЯ МАССОВЫХ ОПЕРАЦИЙ:
-      1. "clear_all": true → ТОЛЬКО для "забудь всё", "очисти все предпочтения", "вычеркни всё" - очищает ВСЕ аллергии и предпочтения, но НЕ удаляет членов семьи
-      2. "clear_scope" → для конкретных типов: "удали все аллергии", "вычеркни все нелюбимые"
-      3. "clear_all" НИКОГДА не удаляет членов семьи, только их предпочтения
-
-      Примеры:
-      - "Вычеркни все наши аллергии и нелюбимые продукты. Оставьте только то, что я люблю: картофель, морковь, говядину" → 
-        {
-          "clear_all": true,  // очистить все предпочтения
-          "family": [
-            {"name": "муж", "likes": ["картофель", "морковь", "говядина"]}
-          ]
-        }
-      - "Удали все аллергии" → 
-        {
-          "clear_scope": "allergies"
-        }
-      - "Забудь всё, что было раньше" → 
-        {
-          "clear_all": true
-        }
-      - "Очисти все мои предпочтения" → 
-        {
-          "clear_scope": "dislikes",
-          "remove": {"likes": []}
-        }
-    `;
-
+    // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        {
+          role: "system",
+          content: `Ты — парсер сообщений пользователя для AI-ассистента питания. 
+          Верни СТРОГО JSON:
+          {
+            "budget": number | null,
+            "goals": string[] | [],
+            "updates_per_person": [
+              {
+                "name": string,
+                "add_allergies": string[] | [],
+                "remove_allergies": string[] | [],
+                "add_dislikes": string[] | [],
+                "remove_dislikes": string[] | [],
+                "add_likes": string[] | [],
+                "remove_likes": string[] | []
+              }
+            ]
+          }
+          Никакого текста вне JSON.`
+        },
+        { role: "user", content: message }
+      ],
       temperature: 0.1,
-      response_format: { type: "json_object" }
+      response_format: { type: "json_object" },
     });
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      console.log('AI не вернул контент');
-      return;
-    }
+    const raw = response.choices[0]?.message?.content;
+    if (!raw) return console.log("AI не вернул данные");
 
-    console.log('AI ответил:', content);
+    const data = JSON.parse(raw);
 
-    let data;
+    // 🧠 AI-driven интерпретация смысла "прошла аллергия"
+    const intentPrompt = `
+    Ты — логический парсер сообщений о питании.
+    Определи, выражает ли сообщение пользователя факт, что аллергия прошла (то есть нужно удалить данные о ней).
+    Ответь строго в JSON-формате:
+    { "allergyGone": true | false }
+
+    Сообщение: "${message}"
+    `;
+
     try {
-      data = JSON.parse(content);
-    } catch (parseError) {
-      console.error('Ошибка парсинга JSON:', parseError);
-      return;
-    }
+      const intentResp = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "system", content: intentPrompt }],
+        temperature: 0,
+        response_format: { type: "json_object" }
+      });
 
-    // 🔄 ОБРАБОТКА ПОЛНОГО СБРОСА ДАННЫХ - ТОЛЬКО ПРЕДПОЧТЕНИЙ, НЕ ЧЛЕНОВ СЕМЬИ
-    if (data.clear_all) {
-      console.log('🔄 Полный сброс предпочтений и аллергий по команде пользователя');
-      
-      // НЕ удаляем членов семьи, только очищаем их предпочтения и аллергии
-      const { data: familyMembers } = await supabase
-        .from('family_members')
-        .select('id, name, allergies, dislikes, likes')
-        .eq('profile_id', profile.id);
+      const parsedIntent = JSON.parse(intentResp.choices[0]?.message?.content || "{}");
+      const allergyGoneFlag = !!parsedIntent.allergyGone;
 
-      if (familyMembers) {
-        for (const member of familyMembers) {
-          const { error } = await supabase
-            .from('family_members')
-            .update({
-              allergies: [],
-              dislikes: [], 
-              likes: []
-            })
-            .eq('id', member.id);
-            
-          if (error) {
-            console.error(`Ошибка очистки данных у ${member.name}:`, error);
-          } else {
-            console.log(`Данные очищены у ${member.name}`);
-          }
-        }
-      }
-
-      // Сбрасываем бюджет и цели? НЕТ - только если явно указано
-      // Оставляем бюджет и цели без изменений
-      console.log('Предпочтения и аллергии очищены, члены семьи сохранены');
-    }
-
-    // 🔄 ОБРАБОТКА МАССОВОГО УДАЛЕНИЯ - ТОЛЬКО ДЛЯ ЯВНЫХ КОМАНД
-    if (data.clear_scope) {
-      // ЗАЩИТА: проверяем, что это действительно команда массового удаления
-      const messageLower = message.toLowerCase();
-      const massDeleteKeywords = [
-        'все аллергии', 'все нелюбимые', 'все любимые', 
-        'вычеркни все', 'удали все', 'очисти все',
-        'никаких аллергий', 'никаких нелюбимых'
-      ];
-      
-      const isExplicitMassDelete = massDeleteKeywords.some(keyword => 
-        messageLower.includes(keyword)
-      );
-      
-      if (!isExplicitMassDelete) {
-        console.log('❌ Защита: неявная команда массового удаления, пропускаем');
-      } else {
-        console.log(`🔄 Массовое удаление: ${data.clear_scope}`);
-        
-        const { data: familyMembers } = await supabase
-          .from('family_members')
-          .select('id, name, allergies, dislikes, likes')
-          .eq('profile_id', profile.id);
-
-        if (familyMembers) {
-          for (const member of familyMembers) {
-            const updateData: any = {};
-            
-            if (data.clear_scope === 'allergies') {
-              updateData.allergies = [];
-              console.log(`Очищаем аллергии у ${member.name}`);
-            }
-            
-            if (data.clear_scope === 'dislikes') {
-              updateData.dislikes = [];
-              console.log(`Очищаем dislikes у ${member.name}`);
-            }
-            
-            if (data.clear_scope === 'likes') {
-              updateData.likes = [];
-              console.log(`Очищаем likes у ${member.name}`);
-            }
-            
-            const { error } = await supabase
-              .from('family_members')
-              .update(updateData)
-              .eq('id', member.id);
-              
-            if (error) {
-              console.error(`Ошибка массового удаления у ${member.name}:`, error);
-            }
-          }
-        }
-      }
-    }
-
-    // 🔄 СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ СЦЕНАРИЯ 5: Массовое удаление + установка likes
-    const messageLower = message.toLowerCase();
-    if ((messageLower.includes('вычеркни все') || messageLower.includes('очисти все')) && 
-        (messageLower.includes('оставьте только') || messageLower.includes('оставь только'))) {
-      
-      console.log('🔄 Специальная обработка: массовое удаление + установка likes');
-      
-      // Очищаем ВСЕ предпочтения у всех членов семьи
-      const { data: allMembers } = await supabase
-        .from('family_members')
-        .select('id, name')
-        .eq('profile_id', profile.id);
-
-      if (allMembers) {
-        for (const member of allMembers) {
-          const { error } = await supabase
-            .from('family_members')
-            .update({
-              allergies: [],
-              dislikes: [],
-              likes: []
-            })
-            .eq('id', member.id);
-            
-          if (error) {
-            console.error(`Ошибка очистки данных у ${member.name}:`, error);
-          } else {
-            console.log(`Данные очищены у ${member.name}`);
-          }
-        }
-        console.log('Все предпочтения очищены у всех членов семьи');
-      }
-
-      // Извлекаем продукты для добавления в likes
-      const likesMatch = message.match(/люблю:\s*([^.]*)/) || 
-                         message.match(/оставь только[^:]*:\s*([^.]*)/) ||
-                         message.match(/оставьте только[^:]*:\s*([^.]*)/);
-      
-      if (likesMatch && likesMatch[1]) {
-        const products = likesMatch[1].split(',').map(p => p.trim()).filter(p => p.length > 0);
-        console.log('Найдены продукты для likes:', products);
-        
-        if (products.length > 0) {
-          // Определяем, кому добавлять (по контексту)
-          let targetMembers = ['муж']; // по умолчанию
-          if (messageLower.includes(' у жены ') || messageLower.includes(' жена ')) {
-            targetMembers = ['жена'];
-          } else if (messageLower.includes(' у нас ') || messageLower.includes(' мы ')) {
-            targetMembers = allMembers ? allMembers.map(m => m.name) : ['муж', 'жена'];
-          }
-
-          console.log('Добавляем продукты членам:', targetMembers);
-
-          // Добавляем продукты указанным членам семьи
-          for (const memberName of targetMembers) {
-            const { data: targetMember } = await supabase
-              .from('family_members')
-              .select('id, likes')
-              .eq('profile_id', profile.id)
-              .eq('name', memberName)
-              .single();
-
-            if (targetMember) {
-              const { error } = await supabase
-                .from('family_members')
-                .update({ 
-                  likes: Array.from(new Set([...products])) 
-                })
-                .eq('id', targetMember.id);
-
-              if (error) {
-                console.error(`Ошибка добавления likes ${memberName}:`, error);
-              } else {
-                console.log(`Продукты добавлены в likes ${memberName}:`, products);
-                
-                // Сохраняем в diet_facts
-                await saveToDietFacts(profile.id, targetMember.id, {
-                  name: memberName,
-                  likes: products,
-                  allergies: [],
-                  dislikes: []
-                });
-              }
-            }
-          }
-        }
-      }
-      
-      // После специальной обработки выходим из функции, чтобы не выполнять стандартную логику
-      return;
-    }
-
-    // Сохраняем бюджет и цели
-    if (data.budget || data.goals?.length > 0) {
-      const updateData: any = {};
-      if (data.budget) updateData.budget = data.budget;
-      if (data.goals?.length > 0) updateData.goals = data.goals.join(', ');
-      
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update(updateData)
-        .eq('id', profile.id);
-
-      if (updateError) {
-        console.error('Ошибка обновления профиля:', updateError);
-      } else {
-        console.log('Профиль обновлен:', updateData);
-      }
-    }
-
-    // 🔄 ОБРАБОТКА УДАЛЕНИЯ ДАННЫХ
-    if (data.remove && (data.remove.allergies?.length > 0 || data.remove.dislikes?.length > 0 || data.remove.likes?.length > 0)) {
-      console.log('Найдены данные для удаления:', data.remove);
-      
-      // УЛУЧШЕННЫЙ анализ контекста
-      let targetMembers: string[] = [];
-      const messageLower = message.toLowerCase();
-      
-      if (messageLower.includes(' у жены ') || messageLower.includes(' жена ') || 
-          messageLower.includes(' у неё ') || messageLower.includes(' у супруги ') ||
-          messageLower.match(/(?:у|нет)\s+жены/)) {
-        targetMembers = ['жена'];
-        console.log('Определен контекст: жена');
-      } 
-      else if (messageLower.includes(' у меня ') || messageLower.includes(' я ') || 
-               messageLower.includes(' мне ') || messageLower.match(/(?:у|нет)\s+меня/) ||
-               messageLower.includes(' у мужа ') || messageLower.includes(' муж ') || 
-               messageLower.includes(' у него ')) {
-        targetMembers = ['муж'];
-        console.log('Определен контекст: муж');
-      }
-      else if (messageLower.includes(' у нас ') || messageLower.includes(' мы ') || 
-               messageLower.includes(' нам ') || messageLower.match(/(?:у|нет)\s+нас/) ||
-               messageLower.match(/мы\s+.*(?:не\s+)?любим/) ||
-               messageLower.match(/мы\s+.*(?:не\s+)?едим/) ||
-               messageLower.match(/мы\s+.*(?:не\s+)?употребляем/) ||
-               messageLower.match(/мы\s+.*больше\s+не/) ||
-               messageLower.match(/мы\s+.*не\s+не\s+любим/) ||
-               messageLower.includes(' наши ') || messageLower.includes(' нам ') ||
-               // Добавляем поддержку массовых операций
-               messageLower.includes(' все ') || messageLower.includes(' никакой ') ||
-               messageLower.includes(' вычеркните ') || messageLower.includes(' удали ')) {
-        targetMembers = ['муж', 'жена'];
-        console.log('Определен контекст: оба');
-      }
-      else {
-        // Если контекст не ясен - используем эвристику
-        if (messageLower.includes(' мы ') || messageLower.startsWith('мы ') || 
-            messageLower.includes(' наш') || messageLower.includes(' нам ')) {
-          targetMembers = ['муж', 'жена'];
-          console.log('Эвристика: найдены слова "мы/наш/нам", применяем к обоим');
+      if (allergyGoneFlag) {
+        console.log('🧠 AI определил, что речь о прошедших аллергиях — добавляем remove_allergies=["все"]');
+        if (!data.updates_per_person || data.updates_per_person.length === 0) {
+          data.updates_per_person = [{ name: 'все', remove_allergies: ['все'] }];
         } else {
-          console.log('❌ Контекст не ясен, пропускаем удаление');
-          // НЕ выходим - возможно есть данные для добавления
+          data.updates_per_person = data.updates_per_person.map((u: any) => ({
+            ...u,
+            remove_allergies: ['все']
+          }));
         }
       }
+    } catch (intentError) {
+      console.error('⚠️ Ошибка при анализе смысла intentPrompt:', intentError);
+    }
 
-      // Если определили контекст - выполняем удаление
-      if (targetMembers.length > 0) {
-        const { data: targetFamilyMembers } = await supabase
-          .from('family_members')
-          .select('id, name, allergies, dislikes, likes')
-          .eq('profile_id', profile.id)
-          .in('name', targetMembers);
 
-        if (targetFamilyMembers) {
-          for (const member of targetFamilyMembers) {
-            const updatedData: any = {};
-            
-            // Удаляем аллергии
-            if (data.remove.allergies?.length > 0) {
-              const newAllergies = member.allergies.filter((item: string) => 
-                !data.remove.allergies.includes(item)
-              );
-              if (JSON.stringify(newAllergies) !== JSON.stringify(member.allergies)) {
-                updatedData.allergies = newAllergies;
-                console.log(`Удаляем аллергии у ${member.name}:`, data.remove.allergies);
-              }
-            }
-            
-            // Удаляем dislikes
-            if (data.remove.dislikes?.length > 0) {
-              const newDislikes = member.dislikes.filter((item: string) => 
-                !data.remove.dislikes.includes(item)
-              );
-              if (JSON.stringify(newDislikes) !== JSON.stringify(member.dislikes)) {
-                updatedData.dislikes = newDislikes;
-                console.log(`Удаляем dislikes у ${member.name}:`, data.remove.dislikes);
-              }
-            }
-            
-            // Удаляем likes
-            if (data.remove.likes?.length > 0) {
-              const newLikes = member.likes.filter((item: string) => 
-                !data.remove.likes.includes(item)
-              );
-              if (JSON.stringify(newLikes) !== JSON.stringify(member.likes)) {
-                updatedData.likes = newLikes;
-                console.log(`Удаляем likes у ${member.name}:`, data.remove.likes);
-              }
-            }
-            
-            // Сохраняем обновленные данные
-            if (Object.keys(updatedData).length > 0) {
-              const { error } = await supabase
-                .from('family_members')
-                .update(updatedData)
-                .eq('id', member.id);
-                
-              if (error) {
-                console.error(`Ошибка удаления данных у ${member.name}:`, error);
-              } else {
-                console.log(`Данные удалены у ${member.name}`);
-              }
-            } else {
-              console.log(`Нет изменений для удаления у ${member.name}`);
-            }
+    
+
+    // console.log("🧠 AI-структура:", data);
+
+    // 🧠 Эвристика: если AI вернул "у нас / оба / мы" или имена-плейсхолдеры — применяем ко всем членам семьи
+
+    const mentionsGroup =
+    (data.updates_per_person?.some((u: { name: any; }) =>
+      ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
+    )) || /у нас|оба|вместе|мы/i.test(message);
+
+    if (mentionsGroup) {
+      const { data: allMembersRaw, error: listErr } = await supabase
+        .from('family_members')
+        .select('name')
+        .eq('profile_id', profile.id);
+
+      // Нормализуем в массив, даже если null/undefined
+      const allMembers = Array.isArray(allMembersRaw) ? allMembersRaw : [];
+
+      if (allMembers.length > 0) {
+        const memberNames = allMembers.map(m => m.name);
+        console.log(`🔁 Распознано групповое выражение ("у нас/оба/мы") — применяем ко всем: ${memberNames.join(', ')}`);
+
+        const expandedUpdates: any[] = [];
+        const source = Array.isArray(data.updates_per_person) && data.updates_per_person.length > 0
+          ? data.updates_per_person
+          : [{}]; // если AI не прислал блок — просто размножим пустые операции (на случай других полей)
+
+        for (const u of source) {
+          for (const name of memberNames) {
+            expandedUpdates.push({ ...u, name });
           }
         }
+
+        data.updates_per_person = expandedUpdates;
+      } else {
+        console.log('⚠️ Семейные участники не найдены — невозможно применить групповое обновление');
       }
     }
 
-    // 🔄 СОХРАНЕНИЕ НОВЫХ ДАННЫХ (как раньше)
-    if (data.family?.length > 0) {
-      for (const member of data.family) {
-        if (!member.name) {
-          console.log('❌ Пропускаем члена семьи без имени');
-          continue;
-        }
+    // 🧩 Если после этого в updates_per_person остались только "пользователь"/"партнер", без имён из БД
+    // 🧩 Если после этого в updates_per_person остались только плейсхолдеры — ничего не меняем (лучше запросить уточнение в ответе чата)
+    if (
+      data.updates_per_person?.length > 0 &&
+      data.updates_per_person.every((u: { name: any; }) =>
+        ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
+      )
+    ) {
+      console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
+      // Ничего не сохраняем и продолжаем — текстовый ответ сформирует сам чат-бот.
+    }
 
-        // ПРОВЕРКА: пропускаем пустые объекты (только имя без данных)
-        const hasData = member.age || 
-                       (member.allergies && member.allergies.length > 0) ||
-                       (member.dislikes && member.dislikes.length > 0) || 
-                       (member.likes && member.likes.length > 0);
-        
-        if (!hasData) {
-          console.log(`❌ Пропускаем пустой объект для ${member.name}`);
-          continue;
-        }
+    // 3️⃣ Применяем обновления из updates_per_person
+    if (data.updates_per_person?.length > 0) {
+      for (const update of data.updates_per_person) {
+        const { name, add_allergies = [], remove_allergies = [], add_dislikes = [], remove_dislikes = [], add_likes = [], remove_likes = [] } = update;
 
-        const { data: existing } = await supabase
+        const { data: member } = await supabase
           .from('family_members')
-          .select('id, allergies, dislikes, likes, age, name')
+          .select('id, allergies, dislikes, likes')
           .eq('profile_id', profile.id)
-          .eq('name', member.name)
+          .eq('name', name)
           .single();
 
-        // Подготовка данных с мерджем
-        const mergedData = {
-          profile_id: profile.id,
-          name: member.name,
-          age: member.age || (existing?.age || null),
-          allergies: Array.from(new Set([
-            ...(existing?.allergies || []),
-            ...(member.allergies || [])
-          ])),
-          dislikes: Array.from(new Set([
-            ...(existing?.dislikes || []),
-            ...(member.dislikes || [])
-          ])),
-          likes: Array.from(new Set([
-            ...(existing?.likes || []),
-            ...(member.likes || [])
-          ]))
+        if (!member) {
+          console.log(`❌ Член семьи ${name} не найден`);
+          continue;
+        }
+
+        const updated = {
+          allergies: [...(member.allergies || [])],
+          dislikes: [...(member.dislikes || [])],
+          likes: [...(member.likes || [])],
         };
 
-        if (existing) {
-          const { error: updateError } = await supabase
-            .from('family_members')
-            .update(mergedData)
-            .eq('id', existing.id);
+        // Добавления и удаления с автоматическим контролем взаимных связей
 
-          if (updateError) {
-            console.error('Ошибка обновления члена семьи:', updateError);
-          } else {
-            console.log('Обновлен член семьи с мерджем:', member.name);
-            await saveToDietFacts(profile.id, existing.id, mergedData);
-          }
-        } else {
-          const { data: newMember, error: insertError } = await supabase
-            .from('family_members')
-            .insert(mergedData)
-            .select()
-            .single();
-
-          if (insertError) {
-            console.error('Ошибка создания члена семьи:', insertError);
-          } else if (newMember) {
-            console.log('Создан член семьи:', member.name);
-            await saveToDietFacts(profile.id, newMember.id, mergedData);
+        // ✅ Аллергии
+        if (add_allergies.length) {
+          for (const a of add_allergies) {
+            if (!updated.allergies.includes(a)) updated.allergies.push(a);
+            // Удаляем из likes и dislikes, если есть пересечение
+            updated.likes = updated.likes.filter(l => l !== a);
+            updated.dislikes = updated.dislikes.filter(d => d !== a);
           }
         }
+        if (remove_allergies.length) {
+          if (remove_allergies.includes('все')) {
+            // 🧹 Полное очищение аллергий
+            console.log(`🧹 Полностью очищаем аллергии у ${update.name}`);
+            updated.allergies = [];
+          } else {
+            // Точечное удаление указанных аллергий
+            updated.allergies = updated.allergies.filter(a => !remove_allergies.includes(a));
+            console.log(`❌ Удаляем конкретные аллергии у ${update.name}: ${remove_allergies.join(', ')}`);
+          }
+        }
+
+        // ✅ Нелюбимые продукты
+        if (add_dislikes.length) {
+          for (const d of add_dislikes) {
+            if (!updated.dislikes.includes(d)) updated.dislikes.push(d);
+            // Удаляем из likes, если продукт туда попадал
+            updated.likes = updated.likes.filter(l => l !== d);
+          }
+        }
+        if (remove_dislikes.length) {
+          updated.dislikes = updated.dislikes.filter(d => !remove_dislikes.includes(d));
+        }
+
+        // ✅ Любимые продукты
+        if (add_likes.length) {
+          for (const l of add_likes) {
+            if (!updated.likes.includes(l)) updated.likes.push(l);
+            // Удаляем из dislikes и allergies, если продукт был там
+            updated.dislikes = updated.dislikes.filter(d => d !== l);
+            updated.allergies = updated.allergies.filter(a => a !== l);
+          }
+        }
+        if (remove_likes.length) {
+          updated.likes = updated.likes.filter(l => !remove_likes.includes(l));
+        }
+
+
+        // Убираем пересечения
+        updated.allergies = [...new Set(updated.allergies.filter(a => !updated.likes.includes(a) && !updated.dislikes.includes(a)))];
+        updated.dislikes = [...new Set(updated.dislikes.filter(d => !updated.likes.includes(d) && !updated.allergies.includes(d)))];
+        updated.likes = [...new Set(updated.likes.filter(l => !updated.dislikes.includes(l) && !updated.allergies.includes(l)))];
+
+        const { error } = await supabase
+          .from('family_members')
+          .update({
+            allergies: updated.allergies,
+            dislikes: updated.dislikes,
+            likes: updated.likes
+          })
+          .eq('id', member.id);
+
+        if (error) console.error(`Ошибка обновления ${name}:`, error);
+        else console.log(`✅ Обновлены данные для ${name}:`, updated);
       }
     }
 
-  } catch (error) {
-    console.error('Ошибка сохранения данных:', error);
+    // 4️⃣ Подтягиваем актуальные данные из БД
+    const { data: familyMembers } = await supabase
+      .from('family_members')
+      .select('name, age, weight, allergies, dislikes, likes')
+      .eq('profile_id', profile.id);
+
+    // 5️⃣ Формируем финальный ответ исключительно из БД
+    let text = `Вот актуальная информация о вашей семье:\n\n`;
+
+    for (const m of familyMembers || []) {
+      text += `**${m.name}**\n`;
+      text += `- Любимые продукты: ${m.likes?.join(', ') || 'нет'}\n`;
+      text += `- Нелюбимые продукты: ${m.dislikes?.join(', ') || 'нет'}\n`;
+      text += `- Аллергии: ${m.allergies?.join(', ') || 'нет'}\n\n`;
+    }
+
+    if (profile.budget) text += `**Бюджет:** ${profile.budget} руб.\n`;
+    if (profile.goals) text += `**Цели:** ${profile.goals}\n`;
+
+    // console.log("💬 Итоговый ответ сформирован из БД:", text);
+
+    return { content: text };
+  } catch (err) {
+    console.error("Ошибка в extractBasicInfo:", err);
   }
 }
+
 
 // Сохранение в diet_facts
 async function saveToDietFacts(profileId: number, memberId: number, member: any) {
@@ -580,88 +396,115 @@ async function saveToDietFacts(profileId: number, memberId: number, member: any)
   }
 }
 
+// 🔹 ОБРАБОТКА ИНФОРМАЦИОННЫХ ЗАПРОСОВ (например: "Покажи мне информацию о семье")
+async function handleInfoRequest(userId: string) {
+  const supabase = getSupabaseServer();
+
+  // Получаем профиль
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('id, budget, goals')
+    .eq('user_id', userId)
+    .single();
+
+  if (!profile) {
+    console.log('Профиль не найден для user_id:', userId);
+    return { content: "Профиль не найден" };
+  }
+
+  // Получаем членов семьи
+  const { data: familyMembers } = await supabase
+    .from('family_members')
+    .select('name, age, weight, likes, dislikes, allergies')
+    .eq('profile_id', profile.id);
+
+  // Формируем текстовый ответ для чата
+  let familyText = '';
+  if (familyMembers && familyMembers.length > 0) {
+    familyMembers.forEach((member, index) => {
+      familyText += `${index + 1}. **${member.name}**\n`;
+      familyText += member.age ? `   - Возраст: ${member.age} лет\n` : '';
+      familyText += member.weight ? `   - Вес: ${member.weight} кг\n` : '';
+      familyText += `   - Любимые продукты: ${member.likes?.join(', ') || 'нет данных'}\n`;
+      familyText += `   - Нелюбимые продукты: ${member.dislikes?.join(', ') || 'нет данных'}\n`;
+      familyText += `   - Аллергии: ${member.allergies?.join(', ') || 'нет аллергий'}\n\n`;
+    });
+  } else {
+    familyText = 'Информация о членах семьи отсутствует.';
+  }
+
+  const budgetText = profile.budget ? `- **Бюджет на неделю:** ${profile.budget} рублей\n` : '';
+  const goalsText = profile.goals ? `- **Цели:** ${profile.goals}\n` : '';
+
+  const content = `Вот актуальная информация о вашей семье:\n\n### Состав семьи:\n${familyText}### Общая информация:\n${budgetText}${goalsText}`;
+
+  // Возвращаем объект JSON для UI
+  return {
+    content,
+    family: familyMembers || [],
+    budget: profile.budget || null,
+    goals: profile.goals ? profile.goals.split(',').map((g: string) => g.trim()) : []
+  };
+}
+
+
+// ✅ Основной обработчик POST /api/chat
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const messages = body?.messages || [];
-    const user_id = body?.user_id;
+  const body = await req.json();
+  const messages = body?.messages || [];
+  const user_id = body?.user_id;
 
-    console.log('Получен запрос chat:', {
-      user_id,
-      messagesCount: messages.length,
-      lastMessage: messages[messages.length - 1]?.content
-    });
 
-    // Получаем системный промпт
-    const systemPrompt = `
-      Ты - дружелюбный и умный AI-помощник по семейному питанию. 
+  console.log('Получен запрос chat:', {
+  user_id,
+  messagesCount: messages.length,
+  lastMessage: messages[messages.length - 1]?.content
+  });
 
-      ОСНОВНЫЕ ПРАВИЛА:
-      1. Когда пользователь дает полные данные (семья, бюджет, предпочтения, аллергии, цели) - ПРЕДЛАГАЙ генерацию плана питания
-      2. Если данных не хватает - вежливо запроси недостающее
-      3. Подтверждай изменения простыми словами
-      4. Понимай сложные конструкции ("раньше не любил, теперь люблю")
-      5. Отвечай ТОЛЬКО на вопросы по питанию, бюджету, шопинг-листам
-      6. НЕ давай медицинских рекомендаций и диагнозов
-      7. НЕ обсуждай политику, развлечения, технические детали
-      8. При off-topic запросах вежливо возвращай к теме питания
 
-      КОГДА ПРЕДЛАГАТЬ ПЛАН ПИТАНИЯ:
-      - Есть информация о семье (количество, возраст)
-      - Известен бюджет
-      - Известны предпочтения (что не любят)
-      - Известны аллергии
-      - Известны цели
+  const lastUserMessage = messages.filter((m: { role: string }) => m.role === 'user').pop()?.content;
 
-      ПРИМЕРЫ ЕСТЕСТВЕННЫХ ОТВЕТОВ:
-      - На сложные конструкции: "Понял! Обновляю: добавляю свинину в любимые, убираю курицу из нелюбимых"
-      - На массовые операции: "Хорошо, очищаю все ваши аллергии и предпочтения"
-      - На полный сброс: "Отлично, начинаю с чистого листа!"
 
-      Всегда будь краток, дружелюбен и точен.
+  // 🔹 Если запрос информационный — сразу отдаём из БД
+  if (/покажи|информация|предпочтения|семья|профиль/i.test(lastUserMessage)) {
+  console.log('🔹 Информационный запрос, подставляем данные из БД');
+  const data = await extractBasicInfo(lastUserMessage, user_id);
+  return NextResponse.json({ content: data?.content || 'Не удалось получить информацию' });
+  }
 
-      КЛЮЧЕВЫЕ СООБЩЕНИЯ:
-      - Питаться правильно можно даже экономя
-      - Продуманный список покупок - основа здоровья семьи
-      - Покупайте с умом - не отказывайтесь от полезного
 
-      ИСТОЧНИКИ:
-      - Российские нормы питания (МР 2.3.1.0253-21)
-      - Данные о составе продуктов
-      - Усредненные цены российских магазинов
-    `;
+  // 🔹 Обычный сценарий — с обновлениями
+  const completion = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "system", content: "Ты — AI-ассистент по питанию" }, ...messages],
+  temperature: 0.7,
+  });
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...messages,
-      ],
-      temperature: 0.7,
-    });
 
-    const content = completion.choices[0]?.message?.content || "Не удалось обработать запрос";
+  const content = completion.choices[0]?.message?.content || "Не удалось обработать запрос";
 
-    console.log('AI сгенерировал ответ:', content);
 
-    // Асинхронно сохраняем данные
-    if (user_id && messages.length > 0) {
-      const lastUserMessage = messages.filter((m: { role: string }) => m.role === 'user').pop()?.content;
-      if (lastUserMessage) {
-        console.log('Запускаем сохранение для сообщения:', lastUserMessage);
-        extractBasicInfo(lastUserMessage, user_id).catch(error => {
-          console.error('Ошибка в extractBasicInfo:', error);
-        });
-      }
-    }
+  // console.log('AI сгенерировал ответ:', content);
 
-    return NextResponse.json({ content });
 
-  } catch (error: any) {
-    console.error('Ошибка в API chat:', error);
-    return NextResponse.json(
-      { error: "Извините, произошла ошибка. Попробуйте еще раз." },
-      { status: 500 }
-    );
+  // Асинхронно применяем обновления
+  if (user_id && lastUserMessage) {
+  extractBasicInfo(lastUserMessage, user_id).catch(err => console.error('Ошибка в extractBasicInfo:', err));
+  }
+
+
+  // После того как AI сгенерировал ответ — синхронизируемся с БД
+  let finalContent = content;
+
+  const syncData = await extractBasicInfo(lastUserMessage, user_id);
+  if (syncData?.content) {
+    finalContent = syncData.content; // 🔹 Перезаписываем текст на основанный на БД
+  }
+
+  return NextResponse.json({ content: finalContent });
+  } catch (error) {
+  console.error('Ошибка в API chat:', error);
+  return NextResponse.json({ error: 'Ошибка обработки запроса' }, { status: 500 });
   }
 }
