@@ -335,26 +335,15 @@ async function extractBasicInfo(message: string, userId: string) {
       );
     };
 
-    const ensureMemberRecord = async (rawName: string | undefined | null) => {
+    const getExistingMemberRecord = (rawName: string | undefined | null) => {
       const trimmedName = normalizeName(rawName);
       if (!trimmedName) return null;
       const key = trimmedName.toLowerCase();
       const cached = memberMap.get(key);
-      if (cached) return cached;
-
-      const { data: inserted, error: insertError } = await supabase
-        .from("family_members")
-        .insert({ profile_id: profileRecord.id, name: trimmedName })
-        .select("id, name, age, weight, allergies, dislikes, likes")
-        .maybeSingle();
-
-      if (insertError || !inserted) {
-        console.error(`❌ Не удалось создать запись члена семьи ${trimmedName}:`, insertError);
-        return null;
+      if (!cached) {
+        console.log(`⚠️ Член семьи ${trimmedName} не найден среди существующих записей — пропускаем без авто-создания.`);
       }
-
-      memberMap.set(key, inserted);
-      return inserted;
+      return cached || null;
     };
 
     const applySnapshotToMember = async (snapshot: any) => {
@@ -500,10 +489,29 @@ async function extractBasicInfo(message: string, userId: string) {
 
     // 🧠 Эвристика: если AI вернул "у нас / оба / мы" или имена-плейсхолдеры — применяем ко всем членам семьи
 
+    const groupKeywords = [
+      "все",
+      "всем",
+      "вся семья",
+      "всей семье",
+      "вся наша семья",
+      "семья",
+      "для всех",
+      "для всей семьи",
+    ];
+
+    const normalizedMessage = message.toLowerCase();
+
     const mentionsGroup =
-    (updatesPerPerson.some((u: { name: any; }) =>
-      ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
-    )) || /у нас|оба|вместе|мы/i.test(message);
+      updatesPerPerson.some((u: { name: any }) => {
+        const name = String(u.name || "").toLowerCase();
+        return (
+          ["пользователь", "партнер", "я", "мы", "оба", ...groupKeywords].includes(name) ||
+          groupKeywords.some((keyword) => name.startsWith(keyword))
+        );
+      }) ||
+      /у нас|оба|вместе|мы/.test(normalizedMessage) ||
+      groupKeywords.some((keyword) => normalizedMessage.includes(keyword));
 
     if (mentionsGroup) {
       const { data: allMembersRaw, error: listErr } = await supabase
@@ -569,9 +577,9 @@ async function extractBasicInfo(message: string, userId: string) {
           }
           targets.push(...allMembers);
         } else {
-          const memberRecord = await ensureMemberRecord(name);
+          const memberRecord = getExistingMemberRecord(name);
           if (!memberRecord) {
-            console.log(`❌ Член семьи ${name} не найден и не удалось создать запись`);
+            console.log(`❌ Член семьи ${name} не найден — обновление пропущено до подтверждения пользователя.`);
             continue;
           }
           targets.push(memberRecord);
