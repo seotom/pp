@@ -10,8 +10,61 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
 
+const BASE_SYSTEM_PROMPT = `Ты - дружелюбный и умный AI-помощник по семейному питанию.
+
+      ОСНОВНЫЕ ПРАВИЛА:
+      1. Когда пользователь дает полные данные (семья, бюджет, предпочтения, аллергии, цели) - ПРЕДЛАГАЙ генерацию плана питания
+      2. Если данных не хватает - вежливо запроси недостающее
+      3. Подтверждай изменения простыми словами
+      4. Понимай сложные конструкции ("раньше не любил, теперь люблю")
+      5. Отвечай ТОЛЬКО на вопросы по питанию, бюджету, шопинг-листам
+      6. НЕ давай медицинских рекомендаций и диагнозов
+      7. НЕ обсуждай политику, развлечения, технические детали
+      8. При off-topic запросах вежливо возвращай к теме питания
+
+      КОГДА ПРЕДЛАГАТЬ ПЛАН ПИТАНИЯ:
+      - Есть информация о семье (количество, возраст)
+      - Известен бюджет
+      - Известны предпочтения (что не любят)
+      - Известны аллергии
+      - Известны цели
+
+      ПРИМЕРЫ ЕСТЕСТВЕННЫХ ОТВЕТОВ:
+      - На сложные конструкции: "Понял! Обновляю: добавляю свинину в любимые, убираю курицу из нелюбимых"
+      - На массовые операции: "Хорошо, очищаю все ваши аллергии и предпочтения"
+      - На полный сброс: "Отлично, начинаю с чистого листа!"
+
+      Всегда будь краток, дружелюбен и точен.
+
+      КЛЮЧЕВЫЕ СООБЩЕНИЯ:
+      - Питаться правильно можно даже экономя
+      - Продуманный список покупок - основа здоровья семьи
+      - Покупайте с умом - не отказывайтесь от полезного
+
+      ИСТОЧНИКИ:
+      - Российские нормы питания (МР 2.3.1.0253-21)
+      - Данные о составе продуктов
+      - Усредненные цены российских магазинов`;
+
+type SupabaseProfile = {
+  id: number;
+  budget: number | null;
+  goals: string | null;
+};
+
+type SupabaseFamilyMember = {
+  name: string | null;
+  age: number | null;
+  weight: number | null;
+  allergies: string[] | null;
+  dislikes: string[] | null;
+  likes: string[] | null;
+};
+
 // 🔹 Функция получения актуальных данных из Supabase
-async function getUserDataFromDB(user_id: string) {
+async function getUserDataFromDB(
+  user_id: string
+): Promise<{ profile: SupabaseProfile; family: SupabaseFamilyMember[] } | null> {
   const supabase = getSupabaseServer();
 
   const { data: profile, error: profileError } = await supabase
@@ -36,8 +89,97 @@ async function getUserDataFromDB(user_id: string) {
 
   return {
     profile,
-    family: familyMembers || [],
+    family: (familyMembers as SupabaseFamilyMember[] | null) || [],
   };
+}
+
+function buildKnownDataSummary(data: Awaited<ReturnType<typeof getUserDataFromDB>>): string {
+  if (!data) {
+    return "Известных данных пока нет.";
+  }
+
+  const segments: string[] = [];
+  const family = data.family || [];
+
+  if (family.length > 0) {
+    const memberLines = family
+      .map((member, index) => {
+        const name = member.name || `Участник ${index + 1}`;
+        const age = typeof member.age === "number" && !Number.isNaN(member.age) ? `${member.age} лет` : "возраст не указан";
+        const weight =
+          typeof member.weight === "number" && !Number.isNaN(member.weight)
+            ? `${member.weight} кг`
+            : "вес не указан";
+        const likes = Array.isArray(member.likes) ? member.likes.join(", ") || "не указаны" : "не указаны";
+        const dislikes = Array.isArray(member.dislikes) ? member.dislikes.join(", ") || "не указаны" : "не указаны";
+        const allergies = Array.isArray(member.allergies) ? member.allergies.join(", ") || "не указаны" : "не указаны";
+
+        return `- ${name}: ${age}, ${weight}. Любимые: ${likes}. Нелюбимые: ${dislikes}. Аллергии: ${allergies}.`;
+      })
+      .join("\n");
+
+    segments.push(`Состав семьи:\n${memberLines}`);
+  }
+
+  const budgetValue = data.profile?.budget;
+  if (typeof budgetValue === "number" && !Number.isNaN(budgetValue)) {
+    segments.push(`Бюджет на неделю: ${budgetValue} руб.`);
+  }
+
+  const goalsValue =
+    typeof data.profile?.goals === "string" ? data.profile.goals.trim() : "";
+  if (goalsValue.length > 0) {
+    segments.push(`Цели: ${goalsValue}.`);
+  }
+
+  if (segments.length === 0) {
+    return "Известных данных пока нет.";
+  }
+
+  return segments.join("\n");
+}
+
+function buildStepGuidance(data: Awaited<ReturnType<typeof getUserDataFromDB>>): string {
+  const family = (data?.family as SupabaseFamilyMember[]) || [];
+
+  const hasCompleteFamily =
+    family.length > 0 &&
+    family.every((member) => {
+      const hasName = typeof member.name === "string" && member.name.trim().length > 0;
+      const hasAge = typeof member.age === "number" && !Number.isNaN(member.age);
+      const hasWeight = typeof member.weight === "number" && !Number.isNaN(member.weight);
+      return hasName && hasAge && hasWeight;
+    });
+
+  if (!hasCompleteFamily) {
+    return "Шаг 1: сначала уточни состав семьи — сколько человек, их возраст и вес каждого. Если чего-то не хватает, вежливо запроси эти данные.";
+  }
+
+  const budgetValue = data?.profile?.budget;
+  const hasBudget = typeof budgetValue === "number" && !Number.isNaN(budgetValue);
+  if (!hasBudget) {
+    return "Шаг 2: запроси недельный бюджет семьи на питание в рублях. Не переходи к следующим шагам, пока бюджет не указан.";
+  }
+
+  const hasPreferences = family.every(
+    (member) => Array.isArray(member.likes) && Array.isArray(member.dislikes)
+  );
+  if (!hasPreferences) {
+    return "Шаг 3: уточни любимые и нелюбимые продукты по каждому члену семьи. Можно отметить, если у кого-то нет выраженных предпочтений.";
+  }
+
+  const hasAllergies = family.every((member) => Array.isArray(member.allergies));
+  if (!hasAllergies) {
+    return "Шаг 4: попроси перечислить пищевые аллергии или подтвердить, что их нет.";
+  }
+
+  const goalsValue = typeof data?.profile?.goals === "string" ? data.profile?.goals?.trim() : "";
+  const hasGoals = !!goalsValue;
+  if (!hasGoals) {
+    return "Шаг 5: уточни цели питания (например, экономия, ЗОЖ, похудение). После получения целей предложи сформировать план.";
+  }
+
+  return "Все шаги выполнены. Поддерживай тему питания и при необходимости предложи составить план питания на основе собранных данных.";
 }
 
 // 🔧 Функция синхронизированного анализа и возврата данных
@@ -462,6 +604,15 @@ export async function POST(req: NextRequest) {
     });
 
     const lastUserMessage = messages.filter((m: { role: string }) => m.role === "user").pop()?.content ?? "";
+    const userData = user_id ? await getUserDataFromDB(user_id) : null;
+    const stepGuidance = buildStepGuidance(userData);
+    const knownDataSummary = buildKnownDataSummary(userData);
+    const systemMessageContent = [
+      BASE_SYSTEM_PROMPT,
+      `Текущий статус сбора данных: ${stepGuidance}`,
+      `Известные данные профиля: ${knownDataSummary}`,
+      "Всегда поддерживай последовательность шагов и не переходи к следующему, пока предыдущий не закрыт.",
+    ].join("\n\n");
 
     // 🔹 Если запрос информационный — сразу отдаём из БД
     if (/покажи|информация|предпочтения|семья|профиль/i.test(lastUserMessage)) {
@@ -483,7 +634,7 @@ export async function POST(req: NextRequest) {
         try {
           const completion = await openai.chat.completions.create({
             model: "gpt-4o-mini",
-            messages: [{ role: "system", content: "Ты — AI-ассистент по питанию" }, ...messages],
+            messages: [{ role: "system", content: systemMessageContent }, ...messages],
             temperature: 0.7,
             stream: true,
           });
