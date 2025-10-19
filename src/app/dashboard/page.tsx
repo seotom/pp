@@ -37,7 +37,7 @@ export default function DashboardPage() {
   const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevScrollTop: number } | null>(null);
   const loadMoreLockRef = useRef(false);
   const assistantIndexRef = useRef<number | null>(null);
-  const mountedRef = useRef(false);
+  const initialScrollDoneRef = useRef(false);
 
   // управление остановкой ответа: AbortController для запроса
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -68,6 +68,7 @@ export default function DashboardPage() {
       setInput("");
       setIsLoading(false);
       restoredRef.current = true;
+      initialScrollDoneRef.current = false;
     })();
   }, [session?.user?.email]);
 
@@ -138,9 +139,6 @@ export default function DashboardPage() {
     });
   }, []);
 
-  const lastVisibleMessageId =
-    visibleMessages.length > 0 ? visibleMessages[visibleMessages.length - 1]?.id ?? null : null;
-
   const loadMoreVisibleMessages = useCallback(() => {
     if (loadMoreLockRef.current) return;
     if (visibleCount >= messages.length) return;
@@ -155,50 +153,17 @@ export default function DashboardPage() {
     setVisibleCount((prev) => {
       const total = messages.length;
       if (prev >= total) return prev;
-      return Math.min(total, prev + 10);
+      return Math.min(total, prev + 50);
     });
   }, [messages.length, visibleCount]);
 
-  const handleContainerScroll = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    if (!mountedRef.current) return;
-    if (container.scrollHeight <= container.clientHeight + 10) return;
-    if (container.scrollTop <= 24) {
-      loadMoreVisibleMessages();
-    }
-  }, [loadMoreVisibleMessages]);
-
   useEffect(() => {
-    mountedRef.current = true;
-  }, []);
-
-  useLayoutEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    if (visibleCount >= messages.length) return;
-    if (container.scrollHeight > container.clientHeight + 8) return;
-    setVisibleCount((prev) => {
-      const total = messages.length;
-      if (prev >= total) return prev;
-      return Math.min(total, prev + 10);
-    });
-  }, [visibleCount, messages.length]);
-
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const onScroll = () => handleContainerScroll();
-    container.addEventListener("scroll", onScroll);
-    return () => {
-      container.removeEventListener("scroll", onScroll);
-    };
-  }, [handleContainerScroll]);
-
-  useLayoutEffect(() => {
-    if (!lastVisibleMessageId) return;
+    if (!restoredRef.current) return;
+    if (initialScrollDoneRef.current) return;
+    if (messages.length === 0) return;
+    initialScrollDoneRef.current = true;
     commitScrollToBottom();
-  }, [lastVisibleMessageId, commitScrollToBottom]);
+  }, [messages.length, commitScrollToBottom]);
 
   useLayoutEffect(() => {
     if (!pendingScrollAdjustRef.current) return;
@@ -254,6 +219,7 @@ export default function DashboardPage() {
     setMessages([]);
     setInput("");
     setVisibleCount(0);
+    initialScrollDoneRef.current = false;
   };
 
   if (status === "loading") {
@@ -320,8 +286,16 @@ export default function DashboardPage() {
                   <>
                     <div className="h-px" aria-hidden />
                     {visibleCount < messages.length && (
-                      <div className="text-center text-xs text-gray-400 py-1">
-                        Прокрутите вверх, чтобы загрузить предыдущие сообщения
+                      <div className="flex flex-col items-center gap-2 py-2 text-xs text-gray-500">
+                        <span>Для загрузки предыдущих сообщений нажмите на кнопку</span>
+                        <button
+                          type="button"
+                          onClick={loadMoreVisibleMessages}
+                          disabled={loadMoreLockRef.current}
+                          className="rounded-full border border-gray-300 px-4 py-1.5 text-[13px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Загрузить предыдущие 50 сообщений
+                        </button>
                       </div>
                     )}
                     {visibleMessages.map((m) => (
@@ -380,7 +354,6 @@ export default function DashboardPage() {
                 assistantIndexRef.current = updated.length - 1;
                 return updated;
               });
-              commitScrollToBottom();
               setInput("");
               setIsLoading(true);
               // подготовить контроллер для возможной отмены
@@ -410,6 +383,7 @@ export default function DashboardPage() {
 
                 const decoder = new TextDecoder();
                 let fullText = "";
+                let streamCompleted = false;
                 const updateAssistantMessage = (content: string) => {
                   setMessages((prev) => {
                     if (prev.length === 0) return prev;
@@ -431,7 +405,6 @@ export default function DashboardPage() {
                     assistantIndexRef.current = targetIndex;
                     return copy;
                   });
-                  commitScrollToBottom();
                 };
 
                 while (true) {
@@ -449,7 +422,11 @@ export default function DashboardPage() {
                   fullText += remaining;
                   updateAssistantMessage(fullText);
                 }
+                streamCompleted = true;
                 reader.releaseLock();
+                if (streamCompleted) {
+                  commitScrollToBottom();
+                }
               } catch (err) {
                 const isAbortError =
                   err instanceof DOMException
