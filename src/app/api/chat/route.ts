@@ -318,6 +318,23 @@ async function extractBasicInfo(message: string, userId: string) {
       }
     }
 
+    const isGroupPlaceholder = (rawName: string | undefined | null) => {
+      const trimmed = normalizeName(rawName);
+      if (!trimmed) return false;
+      const lower = trimmed.toLowerCase();
+      return (
+        [
+          "все",
+          "вся семья",
+          "семья",
+          "всем",
+          "для всех",
+          "вся наша семья",
+          "всей семье",
+        ].includes(lower) || /^(все|вся)(\s|$)/.test(lower)
+      );
+    };
+
     const ensureMemberRecord = async (rawName: string | undefined | null) => {
       const trimmedName = normalizeName(rawName);
       if (!trimmedName) return null;
@@ -543,89 +560,103 @@ async function extractBasicInfo(message: string, userId: string) {
           remove_likes = [],
         } = update;
 
-        const memberRecord = await ensureMemberRecord(name);
-        if (!memberRecord) {
-          console.log(`❌ Член семьи ${name} не найден и не удалось создать запись`);
-          continue;
-        }
-
-        const updated = {
-          allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
-          dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
-          likes: [...(Array.isArray(memberRecord.likes) ? memberRecord.likes : [])],
-        };
-
-        // Добавления и удаления с автоматическим контролем взаимных связей
-
-        // ✅ Аллергии
-        if (add_allergies.length) {
-          for (const a of add_allergies) {
-            if (!updated.allergies.includes(a)) updated.allergies.push(a);
-            // Удаляем из likes и dislikes, если есть пересечение
-            updated.likes = updated.likes.filter(l => l !== a);
-            updated.dislikes = updated.dislikes.filter(d => d !== a);
+        const targets: any[] = [];
+        if (isGroupPlaceholder(name)) {
+          const allMembers = Array.from(memberMap.values());
+          if (allMembers.length === 0) {
+            console.log('⚠️ Нет членов семьи для группового обновления — пропускаем операцию.');
+            continue;
           }
-        }
-        if (remove_allergies.length) {
-          if (remove_allergies.includes('все')) {
-            // 🧹 Полное очищение аллергий
-            console.log(`🧹 Полностью очищаем аллергии у ${update.name}`);
-            updated.allergies = [];
-          } else {
-            // Точечное удаление указанных аллергий
-            updated.allergies = updated.allergies.filter(a => !remove_allergies.includes(a));
-            console.log(`❌ Удаляем конкретные аллергии у ${update.name}: ${remove_allergies.join(', ')}`);
-          }
-        }
-
-        // ✅ Нелюбимые продукты
-        if (add_dislikes.length) {
-          for (const d of add_dislikes) {
-            if (!updated.dislikes.includes(d)) updated.dislikes.push(d);
-            // Удаляем из likes, если продукт туда попадал
-            updated.likes = updated.likes.filter(l => l !== d);
-          }
-        }
-        if (remove_dislikes.length) {
-          updated.dislikes = updated.dislikes.filter(d => !remove_dislikes.includes(d));
-        }
-
-        // ✅ Любимые продукты
-        if (add_likes.length) {
-          for (const l of add_likes) {
-            if (!updated.likes.includes(l)) updated.likes.push(l);
-            // Удаляем из dislikes и allergies, если продукт был там
-            updated.dislikes = updated.dislikes.filter(d => d !== l);
-            updated.allergies = updated.allergies.filter(a => a !== l);
-          }
-        }
-        if (remove_likes.length) {
-          updated.likes = updated.likes.filter(l => !remove_likes.includes(l));
-        }
-
-
-        // Убираем пересечения
-        updated.allergies = [...new Set(updated.allergies.filter(a => !updated.likes.includes(a) && !updated.dislikes.includes(a)))];
-        updated.dislikes = [...new Set(updated.dislikes.filter(d => !updated.likes.includes(d) && !updated.allergies.includes(d)))];
-        updated.likes = [...new Set(updated.likes.filter(l => !updated.dislikes.includes(l) && !updated.allergies.includes(l)))];
-
-        const { data: savedMember, error } = await supabase
-          .from('family_members')
-          .update({
-            allergies: updated.allergies,
-            dislikes: updated.dislikes,
-            likes: updated.likes
-          })
-          .eq('id', memberRecord.id)
-          .select('id, name, age, weight, allergies, dislikes, likes')
-          .maybeSingle();
-
-        if (error) {
-          console.error(`Ошибка обновления ${name}:`, error);
+          targets.push(...allMembers);
         } else {
-          console.log(`✅ Обновлены данные для ${name}:`, updated);
-          if (savedMember) {
-            memberMap.set(normalizeName(savedMember.name).toLowerCase(), savedMember);
+          const memberRecord = await ensureMemberRecord(name);
+          if (!memberRecord) {
+            console.log(`❌ Член семьи ${name} не найден и не удалось создать запись`);
+            continue;
+          }
+          targets.push(memberRecord);
+        }
+
+        for (const memberRecord of targets) {
+          const updated = {
+            allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
+            dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
+            likes: [...(Array.isArray(memberRecord.likes) ? memberRecord.likes : [])],
+          };
+
+          // Добавления и удаления с автоматическим контролем взаимных связей
+
+          // ✅ Аллергии
+          if (add_allergies.length) {
+            for (const a of add_allergies) {
+              if (!updated.allergies.includes(a)) updated.allergies.push(a);
+              // Удаляем из likes и dislikes, если есть пересечение
+              updated.likes = updated.likes.filter(l => l !== a);
+              updated.dislikes = updated.dislikes.filter(d => d !== a);
+            }
+          }
+          if (remove_allergies.length) {
+            if (remove_allergies.includes('все')) {
+              // 🧹 Полное очищение аллергий
+              console.log(`🧹 Полностью очищаем аллергии у ${memberRecord.name}`);
+              updated.allergies = [];
+            } else {
+              // Точечное удаление указанных аллергий
+              updated.allergies = updated.allergies.filter(a => !remove_allergies.includes(a));
+              console.log(`❌ Удаляем конкретные аллергии у ${memberRecord.name}: ${remove_allergies.join(', ')}`);
+            }
+          }
+
+          // ✅ Нелюбимые продукты
+          if (add_dislikes.length) {
+            for (const d of add_dislikes) {
+              if (!updated.dislikes.includes(d)) updated.dislikes.push(d);
+              // Удаляем из likes, если продукт туда попадал
+              updated.likes = updated.likes.filter(l => l !== d);
+            }
+          }
+          if (remove_dislikes.length) {
+            updated.dislikes = updated.dislikes.filter(d => !remove_dislikes.includes(d));
+          }
+
+          // ✅ Любимые продукты
+          if (add_likes.length) {
+            for (const l of add_likes) {
+              if (!updated.likes.includes(l)) updated.likes.push(l);
+              // Удаляем из dislikes и allergies, если продукт был там
+              updated.dislikes = updated.dislikes.filter(d => d !== l);
+              updated.allergies = updated.allergies.filter(a => a !== l);
+            }
+          }
+          if (remove_likes.length) {
+            updated.likes = updated.likes.filter(l => !remove_likes.includes(l));
+          }
+
+
+          // Убираем пересечения
+          updated.allergies = [...new Set(updated.allergies.filter(a => !updated.likes.includes(a) && !updated.dislikes.includes(a)))];
+          updated.dislikes = [...new Set(updated.dislikes.filter(d => !updated.likes.includes(d) && !updated.allergies.includes(d)))];
+          updated.likes = [...new Set(updated.likes.filter(l => !updated.dislikes.includes(l) && !updated.allergies.includes(l)))];
+
+          const { data: savedMember, error } = await supabase
+            .from('family_members')
+            .update({
+              allergies: updated.allergies,
+              dislikes: updated.dislikes,
+              likes: updated.likes
+            })
+            .eq('id', memberRecord.id)
+            .select('id, name, age, weight, allergies, dislikes, likes')
+            .maybeSingle();
+
+          const targetName = memberRecord.name || name;
+          if (error) {
+            console.error(`Ошибка обновления ${targetName}:`, error);
+          } else {
+            console.log(`✅ Обновлены данные для ${targetName}:`, updated);
+            if (savedMember) {
+              memberMap.set(normalizeName(savedMember.name).toLowerCase(), savedMember);
+            }
           }
         }
       }
