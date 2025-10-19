@@ -334,8 +334,31 @@ async function extractBasicInfo(message: string, userId: string) {
           "для всех",
           "вся наша семья",
           "всей семье",
-        ].includes(lower) || /^(все|вся)(\s|$)/.test(lower)
+          "оба",
+        ].includes(lower) || /^(все|вся|оба)(\s|$)/.test(lower)
       );
+    };
+
+    const ambiguousNamePlaceholders = new Set([
+      "",
+      "пользователь",
+      "партнер",
+      "партнёр",
+      "я",
+      "сам",
+      "сама",
+      "себя",
+      "меня",
+      "мне",
+      "мной",
+      "мы",
+    ]);
+
+    const isAmbiguousName = (rawName: unknown) => {
+      const trimmed = normalizeName(typeof rawName === "string" ? rawName : String(rawName ?? ""));
+      if (!trimmed) return true;
+      const lower = trimmed.toLowerCase();
+      return ambiguousNamePlaceholders.has(lower) || isGroupPlaceholder(lower);
     };
 
     const getExistingMemberRecord = (rawName: string | undefined | null) => {
@@ -352,15 +375,37 @@ async function extractBasicInfo(message: string, userId: string) {
       return cached || null;
     };
 
-    const applySnapshotToMember = async (snapshot: any) => {
+    const applySnapshotToMember = async (
+      snapshot: any,
+      options: { allowPreferenceChanges: boolean }
+    ) => {
       const trimmedName = normalizeName(snapshot?.name);
       if (!trimmedName) return;
+      if (isGroupPlaceholder(trimmedName)) return;
+
       const key = trimmedName.toLowerCase();
       const age = toNumberOrNull(snapshot?.age);
       const weight = toNumberOrNull(snapshot?.weight);
-      const likes = normalizeArray(snapshot?.likes);
-      const dislikes = normalizeArray(snapshot?.dislikes);
-      const allergies = normalizeArray(snapshot?.allergies);
+      const likesRaw = normalizeArray(snapshot?.likes);
+      const dislikesRaw = normalizeArray(snapshot?.dislikes);
+      const allergiesRaw = normalizeArray(snapshot?.allergies);
+
+      const wantsPreferenceChanges = Boolean(
+        (likesRaw && likesRaw.length) ||
+          (dislikesRaw && dislikesRaw.length) ||
+          (allergiesRaw && allergiesRaw.length)
+      );
+
+      const allowPreferences = options.allowPreferenceChanges;
+      const likes = allowPreferences ? likesRaw : null;
+      const dislikes = allowPreferences ? dislikesRaw : null;
+      const allergies = allowPreferences ? allergiesRaw : null;
+
+      if (!allowPreferences && wantsPreferenceChanges) {
+        clarificationNotes.push(
+          `Я услышал про изменения вкусов, но не понял, кого именно касается фраза «${message}». Уточните имя участника, пожалуйста.`
+        );
+      }
 
       const existing = memberMap.get(key);
       if (existing) {
@@ -387,6 +432,11 @@ async function extractBasicInfo(message: string, userId: string) {
           }
         }
       } else {
+        if (isAmbiguousName(trimmedName)) {
+          unknownMembers.add(trimmedName);
+          return;
+        }
+
         const insertPayload: Record<string, any> = {
           profile_id: profileRecord.id,
           name: trimmedName,
@@ -396,6 +446,14 @@ async function extractBasicInfo(message: string, userId: string) {
         if (likes !== null) insertPayload.likes = likes;
         if (dislikes !== null) insertPayload.dislikes = dislikes;
         if (allergies !== null) insertPayload.allergies = allergies;
+
+        if (Object.keys(insertPayload).length <= 2) {
+          unknownMembers.add(trimmedName);
+          clarificationNotes.push(
+            `Чтобы добавить участника «${trimmedName}», назовите, пожалуйста, его возраст и вес.`
+          );
+          return;
+        }
 
         const { data: inserted, error: insertError } = await supabase
           .from("family_members")
@@ -412,9 +470,6 @@ async function extractBasicInfo(message: string, userId: string) {
     };
 
     const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
-    for (const snapshot of rawSnapshots) {
-      await applySnapshotToMember(snapshot);
-    }
 
     const candidateBudget = toNumberOrNull(data?.budget);
     if (candidateBudget !== null) {
@@ -530,8 +585,8 @@ async function extractBasicInfo(message: string, userId: string) {
 
     const mentionsGroupByName = updatesPerPerson.some((u: { name: any }) => {
       const name = String(u.name || "").toLowerCase();
-      if (["пользователь", "партнер", "оба"].includes(name)) {
-        return true;
+      if (["пользователь", "партнер", "партнёр"].includes(name)) {
+        return false;
       }
       return groupNameKeywords.some((keyword) => name.startsWith(keyword));
     });
@@ -561,6 +616,18 @@ async function extractBasicInfo(message: string, userId: string) {
     const mentionsGroup =
       (mentionsGroupByName || mentionsGroupByMessage) &&
       !(hasSingularPronoun && !mentionsGroupByMessage);
+
+    const updatesAllAmbiguous =
+      updatesPerPerson.length === 0 ||
+      updatesPerPerson.every((u: { name: unknown }) => isAmbiguousName(u?.name));
+
+    const shouldSkipPreferenceSnapshots =
+      hasSingularPronoun && !mentionsGroupByMessage && updatesAllAmbiguous;
+
+    const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
+    for (const snapshot of rawSnapshots) {
+      await applySnapshotToMember(snapshot, { allowPreferenceChanges: !shouldSkipPreferenceSnapshots });
+    }
 
     if (mentionsGroup) {
       const { data: allMembersRaw, error: listErr } = await supabase
@@ -596,9 +663,7 @@ async function extractBasicInfo(message: string, userId: string) {
     // 🧩 Если после этого в updates_per_person остались только плейсхолдеры — ничего не меняем (лучше запросить уточнение в ответе чата)
     if (
       updatesPerPerson.length > 0 &&
-      updatesPerPerson.every((u: { name: any; }) =>
-        ['пользователь', 'партнер', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
-      )
+      updatesPerPerson.every((u: { name: any }) => isAmbiguousName(u?.name))
     ) {
       console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
       clarificationNotes.push(
