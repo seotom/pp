@@ -80,7 +80,7 @@ export default function DashboardPage() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevScrollTop: number } | null>(null);
-  const loadMoreLockRef = useRef(false);
+  const [loadMoreLocked, setLoadMoreLocked] = useState(false);
   const assistantIndexRef = useRef<number | null>(null);
   const initialScrollDoneRef = useRef(false);
 
@@ -185,9 +185,9 @@ export default function DashboardPage() {
   }, []);
 
   const loadMoreVisibleMessages = useCallback(() => {
-    if (loadMoreLockRef.current) return;
+    if (loadMoreLocked) return;
     if (visibleCount >= messages.length) return;
-    loadMoreLockRef.current = true;
+    setLoadMoreLocked(true);
     const container = scrollContainerRef.current;
     if (container) {
       pendingScrollAdjustRef.current = {
@@ -200,7 +200,7 @@ export default function DashboardPage() {
       if (prev >= total) return prev;
       return Math.min(total, prev + 20);
     });
-  }, [messages.length, visibleCount]);
+  }, [loadMoreLocked, messages.length, visibleCount]);
 
   useEffect(() => {
     if (!restoredRef.current) return;
@@ -224,8 +224,9 @@ export default function DashboardPage() {
   }, [visibleCount]);
 
   useEffect(() => {
-    loadMoreLockRef.current = false;
-  }, [visibleCount]);
+    if (!loadMoreLocked) return;
+    setLoadMoreLocked(false);
+  }, [loadMoreLocked, visibleCount]);
 
   // кнопка остановки текущего ответа
   const handleStop = () => {
@@ -336,7 +337,7 @@ export default function DashboardPage() {
                         <button
                           type="button"
                           onClick={loadMoreVisibleMessages}
-                          disabled={loadMoreLockRef.current}
+                          disabled={loadMoreLocked}
                           className="rounded-full border border-gray-300 px-4 py-1.5 text-[13px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Загрузить предыдущие 20 сообщений
