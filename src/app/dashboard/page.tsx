@@ -33,8 +33,11 @@ export default function DashboardPage() {
   }, [deferredMessages, visibleCount]);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const topSentinelRef = useRef<HTMLDivElement | null>(null);
+  const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
   const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevScrollTop: number } | null>(null);
+  const loadMoreLockRef = useRef(false);
   const assistantIndexRef = useRef<number | null>(null);
 
   // управление остановкой ответа: AbortController для запроса
@@ -120,45 +123,80 @@ export default function DashboardPage() {
     });
   }, [messages.length]);
 
-  const ensureAutoScroll = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    autoScrollRef.current = distanceToBottom < 40;
+  const commitScrollToBottom = useCallback(() => {
+    if (!autoScrollRef.current) return;
+    requestAnimationFrame(() => {
+      if (bottomAnchorRef.current) {
+        bottomAnchorRef.current.scrollIntoView({ block: "end" });
+      } else if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+      }
+    });
   }, []);
 
-  const handleContainerScroll = useCallback(() => {
+  const loadMoreVisibleMessages = useCallback(() => {
+    if (loadMoreLockRef.current) return;
+    if (visibleCount >= messages.length) return;
+    loadMoreLockRef.current = true;
     const container = scrollContainerRef.current;
-    if (!container) return;
-    const isNearTop = container.scrollTop <= 40;
-    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    autoScrollRef.current = distanceToBottom < 40;
-    if (isNearTop && visibleCount < messages.length) {
+    if (container) {
       pendingScrollAdjustRef.current = {
         prevHeight: container.scrollHeight,
         prevScrollTop: container.scrollTop,
       };
-      setVisibleCount((prev) => Math.min(messages.length, prev + 10));
     }
+    setVisibleCount((prev) => {
+      const total = messages.length;
+      if (prev >= total) return prev;
+      return Math.min(total, prev + 10);
+    });
   }, [messages.length, visibleCount]);
+
+  const handleContainerScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceToBottom <= 40) {
+      autoScrollRef.current = true;
+    } else if (distanceToBottom > 120) {
+      autoScrollRef.current = false;
+    }
+    if (container.scrollTop <= 40) {
+      loadMoreVisibleMessages();
+    }
+  }, [loadMoreVisibleMessages]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     const onScroll = () => handleContainerScroll();
     container.addEventListener("scroll", onScroll);
-    ensureAutoScroll();
+    const sentinel = topSentinelRef.current;
+    if (sentinel) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              loadMoreVisibleMessages();
+            }
+          }
+        },
+        { root: container, threshold: 0.1 }
+      );
+      observer.observe(sentinel);
+      return () => {
+        container.removeEventListener("scroll", onScroll);
+        observer.disconnect();
+      };
+    }
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [handleContainerScroll, ensureAutoScroll]);
+  }, [handleContainerScroll, loadMoreVisibleMessages]);
 
   useLayoutEffect(() => {
-    if (!autoScrollRef.current) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, [visibleMessages, isLoading]);
+    commitScrollToBottom();
+  }, [visibleMessages, isLoading, commitScrollToBottom]);
 
   useLayoutEffect(() => {
     if (!pendingScrollAdjustRef.current) return;
@@ -166,8 +204,15 @@ export default function DashboardPage() {
     if (!container) return;
     const { prevHeight, prevScrollTop } = pendingScrollAdjustRef.current;
     const heightDiff = container.scrollHeight - prevHeight;
-    container.scrollTop = prevScrollTop + heightDiff;
+    requestAnimationFrame(() => {
+      if (!scrollContainerRef.current) return;
+      scrollContainerRef.current.scrollTop = prevScrollTop + heightDiff;
+    });
     pendingScrollAdjustRef.current = null;
+  }, [visibleCount]);
+
+  useEffect(() => {
+    loadMoreLockRef.current = false;
   }, [visibleCount]);
 
   // кнопка остановки текущего ответа
@@ -272,6 +317,7 @@ export default function DashboardPage() {
                   </div>
                 ) : (
                   <>
+                    <div ref={topSentinelRef} className="h-px" aria-hidden />
                     {visibleCount < messages.length && (
                       <div className="text-center text-xs text-gray-400 py-1">
                         Прокрутите вверх, чтобы загрузить предыдущие сообщения
@@ -314,6 +360,7 @@ export default function DashboardPage() {
                         </div>
                       </div>
                     ))}
+                    <div ref={bottomAnchorRef} aria-hidden />
                   </>
                 )}
               </div>
@@ -333,6 +380,7 @@ export default function DashboardPage() {
                 return updated;
               });
               autoScrollRef.current = true;
+              commitScrollToBottom();
               setInput("");
               setIsLoading(true);
               // подготовить контроллер для возможной отмены
@@ -383,9 +431,7 @@ export default function DashboardPage() {
                     assistantIndexRef.current = targetIndex;
                     return copy;
                   });
-                  if (autoScrollRef.current && scrollContainerRef.current) {
-                    scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-                  }
+                  commitScrollToBottom();
                 };
 
                 while (true) {
