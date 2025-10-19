@@ -3,6 +3,7 @@
 "use client";
 import { useSession, signIn, signOut } from "next-auth/react";
 import {
+  memo,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -11,14 +12,49 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ChangeEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
+
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
+  const isAssistant = message.role === "assistant";
+  return (
+    <div className="flex">
+      <div
+        className={
+          "max-w-[80%] rounded-2xl px-4 py-2 text-sm shadow " +
+          (isAssistant ? "bg-gray-100 text-gray-800 mr-auto" : "whitespace-pre-wrap bg-blue-600 text-white ml-auto")
+        }
+      >
+        {isAssistant ? (
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              p: ({ node: _node, ...props }) => <p className="mt-1 mb-2 leading-relaxed" {...props} />,
+              ul: ({ node: _node, ...props }) => <ul className="mt-1 mb-2 pl-5 list-disc" {...props} />,
+              ol: ({ node: _node, ...props }) => <ol className="mt-1 mb-2 pl-5 list-decimal" {...props} />,
+              li: ({ node: _node, ...props }) => <li className="mb-1" {...props} />,
+              strong: ({ node: _node, ...props }) => <strong className="font-semibold" {...props} />,
+            }}
+          >
+            {message.content}
+          </ReactMarkdown>
+        ) : (
+          message.content
+        )}
+      </div>
+    </div>
+  );
+});
+
+MessageBubble.displayName = "MessageBubble";
+
 export default function DashboardPage() {
   const { data: session, status } = useSession();
-  type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [visibleCount, setVisibleCount] = useState(10);
+  const [visibleCount, setVisibleCount] = useState(20);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [budget, setBudget] = useState<number | null>(null);
@@ -31,6 +67,15 @@ export default function DashboardPage() {
     const count = Math.min(total, visibleCount);
     return deferredMessages.slice(total - count);
   }, [deferredMessages, visibleCount]);
+
+  const renderedMessages = useMemo(
+    () => visibleMessages.map((message) => <MessageBubble key={message.id} message={message} />),
+    [visibleMessages]
+  );
+
+  const handleInputChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(event.target.value);
+  }, []);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -56,7 +101,7 @@ export default function DashboardPage() {
         const chat = data?.profile?.family_data?.chat_history;
         const restored = Array.isArray(chat) ? (chat as ChatMessage[]) : [];
         setMessages(restored);
-        setVisibleCount(Math.min(restored.length, 10));
+        setVisibleCount(Math.min(restored.length, 20));
         setBudget(typeof data?.profile?.budget === "number" ? data.profile.budget : null);
         setGoals(typeof data?.profile?.goals === "string" ? data.profile.goals : "");
       } catch {
@@ -112,7 +157,7 @@ export default function DashboardPage() {
       if (total === 0) {
         return 0;
       }
-      const desiredMinimum = Math.min(10, total);
+      const desiredMinimum = Math.min(20, total);
       if (prev < desiredMinimum) {
         return desiredMinimum;
       }
@@ -153,7 +198,7 @@ export default function DashboardPage() {
     setVisibleCount((prev) => {
       const total = messages.length;
       if (prev >= total) return prev;
-      return Math.min(total, prev + 50);
+      return Math.min(total, prev + 20);
     });
   }, [messages.length, visibleCount]);
 
@@ -294,47 +339,11 @@ export default function DashboardPage() {
                           disabled={loadMoreLockRef.current}
                           className="rounded-full border border-gray-300 px-4 py-1.5 text-[13px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Загрузить предыдущие 50 сообщений
+                          Загрузить предыдущие 20 сообщений
                         </button>
                       </div>
                     )}
-                    {visibleMessages.map((m) => (
-                      <div key={m.id} className="flex">
-                        <div
-                          className={
-                            "max-w-[80%] rounded-2xl px-4 py-2 text-sm shadow " +
-                            (m.role === "user"
-                              ? "whitespace-pre-wrap bg-blue-600 text-white ml-auto"
-                              : "bg-gray-100 text-gray-800 mr-auto")
-                          }
-                        >
-                          {m.role === "assistant" ? (
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                p: ({ node, ...props }) => (
-                                  <p className="mt-1 mb-2 leading-relaxed" {...props} />
-                                ),
-                                ul: ({ node, ...props }) => (
-                                  <ul className="mt-1 mb-2 pl-5 list-disc" {...props} />
-                                ),
-                                ol: ({ node, ...props }) => (
-                                  <ol className="mt-1 mb-2 pl-5 list-decimal" {...props} />
-                                ),
-                                li: ({ node, ...props }) => <li className="mb-1" {...props} />,
-                                strong: ({ node, ...props }) => (
-                                  <strong className="font-semibold" {...props} />
-                                ),
-                              }}
-                            >
-                              {m.content}
-                            </ReactMarkdown>
-                          ) : (
-                            m.content
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                    {renderedMessages}
                     <div ref={bottomAnchorRef} aria-hidden />
                   </>
                 )}
@@ -479,7 +488,7 @@ export default function DashboardPage() {
           >
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               placeholder="Сформулируйте свой запрос и нажмите Enter..."
               rows={3}
               className="flex-1 border rounded-xl px-4 py-2 resize-none"
