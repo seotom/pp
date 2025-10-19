@@ -2,7 +2,7 @@
 
 "use client";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -19,22 +19,8 @@ export default function DashboardPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
-  // управление остановкой ответа: AbortController для запроса и флаг отмены набора
+  // управление остановкой ответа: AbortController для запроса
   const abortControllerRef = useRef<AbortController | null>(null);
-  const typingCancelledRef = useRef(false);
-
-  // эффект набора ответа ассистента
-  const typeMessage = async (id: string, text: string) => {
-    const speedMs = 15;
-    for (let i = 1; i <= text.length; i++) {
-      if (typingCancelledRef.current) {
-        break;
-      }
-      const slice = text.slice(0, i);
-      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: slice } : m)));
-      await new Promise((r) => setTimeout(r, speedMs));
-    }
-  };
 
   // приветствие при пустой истории после восстановления
   const restoredRef = useRef(false);
@@ -102,7 +88,6 @@ export default function DashboardPage() {
         abortControllerRef.current.abort();
       } catch {}
     }
-    typingCancelledRef.current = true;
     setIsLoading(false);
   };
 
@@ -239,7 +224,6 @@ export default function DashboardPage() {
               setIsLoading(true);
               // подготовить контроллер для возможной отмены
               abortControllerRef.current = new AbortController();
-              typingCancelledRef.current = false;
               try {
                 const res = await fetch("/api/chat", {
                   method: "POST",
@@ -253,9 +237,40 @@ export default function DashboardPage() {
                   }),
                   signal: abortControllerRef.current.signal,
                 });
-                const data = await res.json();
-                const finalText = data?.content ?? "";
-                await typeMessage(assistantId, finalText);
+                if (!res.ok) {
+                  const errorText = await res.text();
+                  throw new Error(errorText || "Ошибка обработки запроса");
+                }
+
+                const reader = res.body?.getReader();
+                if (!reader) {
+                  throw new Error("Пустой ответ от сервера");
+                }
+
+                const decoder = new TextDecoder();
+                let fullText = "";
+
+                while (true) {
+                  const { value, done } = await reader.read();
+                  if (done) {
+                    break;
+                  }
+                  const chunk = decoder.decode(value, { stream: true });
+                  fullText += chunk;
+                  const textSnapshot = fullText;
+                  setMessages((prev) =>
+                    prev.map((m) => (m.id === assistantId ? { ...m, content: textSnapshot } : m))
+                  );
+                }
+
+                const remaining = decoder.decode();
+                if (remaining) {
+                  fullText += remaining;
+                  setMessages((prev) =>
+                    prev.map((m) => (m.id === assistantId ? { ...m, content: fullText } : m))
+                  );
+                }
+                reader.releaseLock();
               } catch (err) {
                 if ((err as any)?.name === "AbortError") {
                   setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: "(остановлено)" } : m)));
@@ -263,6 +278,7 @@ export default function DashboardPage() {
                   setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: "Ошибка запроса к модели" } : m)));
                 }
               } finally {
+                abortControllerRef.current = null;
                 setIsLoading(false);
                 // подхватить возможное авто-сохранение профиля на сервере
                 const userId = session?.user?.email;
