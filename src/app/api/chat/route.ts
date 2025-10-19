@@ -498,9 +498,28 @@ async function extractBasicInfo(message: string, userId: string) {
       "семья",
       "для всех",
       "для всей семьи",
+      "у нас",
+      "оба",
+      "мы",
+      "вместе",
     ];
 
     const normalizedMessage = message.toLowerCase();
+
+    const matchesGroupKeyword = (text: string, keyword: string) => {
+      const normalizedKeyword = keyword.trim().toLowerCase();
+      if (!normalizedKeyword) {
+        return false;
+      }
+
+      if (normalizedKeyword.includes(" ")) {
+        return text.includes(normalizedKeyword);
+      }
+
+      const escaped = normalizedKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "u");
+      return pattern.test(text);
+    };
 
     const mentionsGroup =
       updatesPerPerson.some((u: { name: any }) => {
@@ -510,8 +529,7 @@ async function extractBasicInfo(message: string, userId: string) {
           groupKeywords.some((keyword) => name.startsWith(keyword))
         );
       }) ||
-      /у нас|оба|вместе|мы/.test(normalizedMessage) ||
-      groupKeywords.some((keyword) => normalizedMessage.includes(keyword));
+      groupKeywords.some((keyword) => matchesGroupKeyword(normalizedMessage, keyword));
 
     if (mentionsGroup) {
       const { data: allMembersRaw, error: listErr } = await supabase
