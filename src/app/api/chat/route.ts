@@ -506,7 +506,7 @@ async function extractBasicInfo(message: string, userId: string) {
       updatesPerPerson.some((u: { name: any }) => {
         const name = String(u.name || "").toLowerCase();
         return (
-          ["пользователь", "партнер", "я", "мы", "оба", ...groupKeywords].includes(name) ||
+          ["пользователь", "партнер", "мы", "оба", ...groupKeywords].includes(name) ||
           groupKeywords.some((keyword) => name.startsWith(keyword))
         );
       }) ||
@@ -548,7 +548,7 @@ async function extractBasicInfo(message: string, userId: string) {
     if (
       updatesPerPerson.length > 0 &&
       updatesPerPerson.every((u: { name: any; }) =>
-        ['пользователь', 'партнер', 'я', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
+        ['пользователь', 'партнер', 'мы', 'оба'].includes(String(u.name || '').toLowerCase())
       )
     ) {
       console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
