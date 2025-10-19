@@ -33,12 +33,11 @@ export default function DashboardPage() {
   }, [deferredMessages, visibleCount]);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
-  const autoScrollRef = useRef(true);
   const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevScrollTop: number } | null>(null);
   const loadMoreLockRef = useRef(false);
   const assistantIndexRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
 
   // управление остановкой ответа: AbortController для запроса
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -124,15 +123,23 @@ export default function DashboardPage() {
   }, [messages.length]);
 
   const commitScrollToBottom = useCallback(() => {
-    if (!autoScrollRef.current) return;
     requestAnimationFrame(() => {
       if (bottomAnchorRef.current) {
-        bottomAnchorRef.current.scrollIntoView({ block: "end" });
+        bottomAnchorRef.current.scrollIntoView({ block: "end", behavior: "smooth" });
       } else if (scrollContainerRef.current) {
-        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        const container = scrollContainerRef.current;
+        container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+      }
+      if (typeof window !== "undefined") {
+        window.requestAnimationFrame(() => {
+          window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+        });
       }
     });
   }, []);
+
+  const lastVisibleMessageId =
+    visibleMessages.length > 0 ? visibleMessages[visibleMessages.length - 1]?.id ?? null : null;
 
   const loadMoreVisibleMessages = useCallback(() => {
     if (loadMoreLockRef.current) return;
@@ -155,48 +162,43 @@ export default function DashboardPage() {
   const handleContainerScroll = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceToBottom <= 40) {
-      autoScrollRef.current = true;
-    } else if (distanceToBottom > 120) {
-      autoScrollRef.current = false;
-    }
-    if (container.scrollTop <= 40) {
+    if (!mountedRef.current) return;
+    if (container.scrollHeight <= container.clientHeight + 10) return;
+    if (container.scrollTop <= 24) {
       loadMoreVisibleMessages();
     }
   }, [loadMoreVisibleMessages]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+  }, []);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (visibleCount >= messages.length) return;
+    if (container.scrollHeight > container.clientHeight + 8) return;
+    setVisibleCount((prev) => {
+      const total = messages.length;
+      if (prev >= total) return prev;
+      return Math.min(total, prev + 10);
+    });
+  }, [visibleCount, messages.length]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     const onScroll = () => handleContainerScroll();
     container.addEventListener("scroll", onScroll);
-    const sentinel = topSentinelRef.current;
-    if (sentinel) {
-      const observer = new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries) {
-            if (entry.isIntersecting) {
-              loadMoreVisibleMessages();
-            }
-          }
-        },
-        { root: container, threshold: 0.1 }
-      );
-      observer.observe(sentinel);
-      return () => {
-        container.removeEventListener("scroll", onScroll);
-        observer.disconnect();
-      };
-    }
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [handleContainerScroll, loadMoreVisibleMessages]);
+  }, [handleContainerScroll]);
 
   useLayoutEffect(() => {
+    if (!lastVisibleMessageId) return;
     commitScrollToBottom();
-  }, [visibleMessages, isLoading, commitScrollToBottom]);
+  }, [lastVisibleMessageId, commitScrollToBottom]);
 
   useLayoutEffect(() => {
     if (!pendingScrollAdjustRef.current) return;
@@ -252,7 +254,6 @@ export default function DashboardPage() {
     setMessages([]);
     setInput("");
     setVisibleCount(0);
-    autoScrollRef.current = true;
   };
 
   if (status === "loading") {
@@ -317,7 +318,7 @@ export default function DashboardPage() {
                   </div>
                 ) : (
                   <>
-                    <div ref={topSentinelRef} className="h-px" aria-hidden />
+                    <div className="h-px" aria-hidden />
                     {visibleCount < messages.length && (
                       <div className="text-center text-xs text-gray-400 py-1">
                         Прокрутите вверх, чтобы загрузить предыдущие сообщения
@@ -379,7 +380,6 @@ export default function DashboardPage() {
                 assistantIndexRef.current = updated.length - 1;
                 return updated;
               });
-              autoScrollRef.current = true;
               commitScrollToBottom();
               setInput("");
               setIsLoading(true);
