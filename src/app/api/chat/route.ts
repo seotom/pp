@@ -469,8 +469,6 @@ async function extractBasicInfo(message: string, userId: string) {
       }
     };
 
-    const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
-
     const candidateBudget = toNumberOrNull(data?.budget);
     if (candidateBudget !== null) {
       const normalizedBudget = Math.max(0, Math.round(candidateBudget));
