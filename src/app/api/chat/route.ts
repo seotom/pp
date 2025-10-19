@@ -489,7 +489,7 @@ async function extractBasicInfo(message: string, userId: string) {
 
     // 🧠 Эвристика: если AI вернул "у нас / оба / мы" или имена-плейсхолдеры — применяем ко всем членам семьи
 
-    const groupKeywords = [
+    const groupNameKeywords = [
       "все",
       "всем",
       "вся семья",
@@ -500,9 +500,10 @@ async function extractBasicInfo(message: string, userId: string) {
       "для всей семьи",
       "у нас",
       "оба",
-      "мы",
       "вместе",
     ];
+
+    const groupMessageKeywords = [...groupNameKeywords, "мы"];
 
     const normalizedMessage = message.toLowerCase();
 
@@ -521,15 +522,39 @@ async function extractBasicInfo(message: string, userId: string) {
       return pattern.test(text);
     };
 
+    const mentionsGroupByName = updatesPerPerson.some((u: { name: any }) => {
+      const name = String(u.name || "").toLowerCase();
+      if (["пользователь", "партнер", "оба"].includes(name)) {
+        return true;
+      }
+      return groupNameKeywords.some((keyword) => name.startsWith(keyword));
+    });
+
+    const mentionsGroupByMessage = groupMessageKeywords.some((keyword) =>
+      matchesGroupKeyword(normalizedMessage, keyword)
+    );
+
+    const singularPronouns = [
+      "я",
+      "меня",
+      "мне",
+      "мной",
+      "мой",
+      "моя",
+      "моё",
+      "мое",
+      "мои",
+      "сама",
+      "сам",
+    ];
+
+    const hasSingularPronoun = singularPronouns.some((keyword) =>
+      matchesGroupKeyword(normalizedMessage, keyword)
+    );
+
     const mentionsGroup =
-      updatesPerPerson.some((u: { name: any }) => {
-        const name = String(u.name || "").toLowerCase();
-        return (
-          ["пользователь", "партнер", "мы", "оба", ...groupKeywords].includes(name) ||
-          groupKeywords.some((keyword) => name.startsWith(keyword))
-        );
-      }) ||
-      groupKeywords.some((keyword) => matchesGroupKeyword(normalizedMessage, keyword));
+      (mentionsGroupByName || mentionsGroupByMessage) &&
+      !(hasSingularPronoun && !mentionsGroupByMessage);
 
     if (mentionsGroup) {
       const { data: allMembersRaw, error: listErr } = await supabase
