@@ -232,6 +232,9 @@ async function extractBasicInfo(message: string, userId: string) {
 
     let profileRecord = profile as SupabaseProfile;
 
+    const clarificationNotes: string[] = [];
+    const unknownMembers = new Set<string>();
+
     // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -342,6 +345,9 @@ async function extractBasicInfo(message: string, userId: string) {
       const cached = memberMap.get(key);
       if (!cached) {
         console.log(`⚠️ Член семьи ${trimmedName} не найден среди существующих записей — пропускаем без авто-создания.`);
+        if (trimmedName) {
+          unknownMembers.add(trimmedName);
+        }
       }
       return cached || null;
     };
@@ -595,6 +601,10 @@ async function extractBasicInfo(message: string, userId: string) {
       )
     ) {
       console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
+      clarificationNotes.push(
+        'Пока не понял, для кого в семье нужно обновить данные. Уточните, пожалуйста, имя или роль человека, чтобы я мог сохранить изменения.'
+      );
+      updatesPerPerson.length = 0;
       // Ничего не сохраняем и продолжаем — текстовый ответ сформирует сам чат-бот.
     }
 
@@ -616,6 +626,9 @@ async function extractBasicInfo(message: string, userId: string) {
           const allMembers = Array.from(memberMap.values());
           if (allMembers.length === 0) {
             console.log('⚠️ Нет членов семьи для группового обновления — пропускаем операцию.');
+            clarificationNotes.push(
+              'Пока нет данных о членах семьи, поэтому не могу применить групповое изменение. Добавьте, пожалуйста, информацию о семье.'
+            );
             continue;
           }
           targets.push(...allMembers);
@@ -713,6 +726,15 @@ async function extractBasicInfo(message: string, userId: string) {
       }
     }
 
+    if (unknownMembers.size > 0) {
+      const unknownList = Array.from(unknownMembers)
+        .map((name) => `«${name}»`)
+        .join(', ');
+      clarificationNotes.push(
+        `Пока не нашёл в вашей семье участника ${unknownList}. Напишите, пожалуйста, точное имя или добавьте его отдельным шагом.`
+      );
+    }
+
     // 4️⃣ Подтягиваем актуальные данные из БД
     const { data: familyMembers } = await supabase
       .from('family_members')
@@ -735,6 +757,11 @@ async function extractBasicInfo(message: string, userId: string) {
     if (profileRecord.goals) text += `**Цели:** ${profileRecord.goals}\n`;
 
     // console.log("💬 Итоговый ответ сформирован из БД:", text);
+
+    if (clarificationNotes.length > 0) {
+      const uniqueNotes = Array.from(new Set(clarificationNotes));
+      text = `${uniqueNotes.join('\n\n')}\n\n${text}`;
+    }
 
     return { content: text };
   } catch (err) {
