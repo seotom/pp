@@ -542,51 +542,93 @@ async function extractBasicInfo(message: string, userId: string) {
         })
       : [];
 
-    // 🧠 AI-driven интерпретация смысла "прошла аллергия"
-    const intentPrompt = `
-    Ты — логический парсер сообщений о питании.
-    Определи, выражает ли сообщение пользователя факт, что аллергия прошла (то есть нужно удалить данные о ней).
-    Ответь строго в JSON-формате:
-    { "allergyGone": true | false }
-
-    Сообщение: "${message}"
-    `;
+    // 🧠 AI-анализ контекста "прошла ли аллергия"
+    let shouldApplyFamilyAllergyCleanup = false;
+    let shouldDeferAllergyUpdatesForConfirmation = false;
 
     try {
+      const intentPrompt = `
+        Ты — аналитик сообщений о питании. Определи, описывает ли пользователь ситуацию,
+        в которой пищевая аллергия прошла и данные об аллергии нужно удалить.
+        Отличай высказывания о вкусовых предпочтениях ("нравится", "стали есть")
+        от сообщений о здоровье.
+
+        Верни СТРОГО JSON вида:
+        {
+          "classification": "allergy_gone" | "no_allergy_context" | "uncertain",
+          "scope": "entire_family" | "specific_people" | "none",
+          "needs_confirmation": boolean,
+          "reason": string
+        }
+
+        Правила:
+        - "allergy_gone" ставь только если явно говорится, что аллергии больше нет или её нужно удалить.
+        - "no_allergy_context" используй, если речь идёт о вкусах или теме, не связанной с аллергией.
+        - Если сомневаешься, используй "uncertain" и needs_confirmation=true.
+        - Если сообщение охватывает всю семью, выбирай scope="entire_family".
+          Если упомянуты конкретные люди, используй "specific_people".
+        - reason коротко поясняет вывод на русском языке.
+
+        Сообщение пользователя: "${message}"
+      `;
+
       const intentResp = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [{ role: "system", content: intentPrompt }],
         temperature: 0,
-        response_format: { type: "json_object" }
+        response_format: { type: "json_object" },
       });
 
       const parsedIntent = JSON.parse(intentResp.choices[0]?.message?.content || "{}");
-      const allergyGoneFlag = !!parsedIntent.allergyGone;
+      const classification = typeof parsedIntent.classification === "string" ? parsedIntent.classification : "no_allergy_context";
+      const scope = typeof parsedIntent.scope === "string" ? parsedIntent.scope : "none";
+      const needsConfirmation = Boolean(parsedIntent.needs_confirmation);
+      const reason = typeof parsedIntent.reason === "string" ? parsedIntent.reason.trim() : "";
 
-      if (allergyGoneFlag) {
-        console.log('🧠 AI определил, что речь о прошедших аллергиях — добавляем remove_allergies=["все"]');
-        if (updatesPerPerson.length === 0) {
-          updatesPerPerson.push({
-            name: "",
-            original_name: "все",
-            resolved_names: [],
-            applies_to_family: true,
-            add_allergies: [],
-            remove_allergies: ["все"],
-            add_dislikes: [],
-            remove_dislikes: [],
-            add_likes: [],
-            remove_likes: [],
-          });
-        } else {
-          for (const entry of updatesPerPerson) {
-            entry.remove_allergies = ["все"];
-            entry.applies_to_family = true;
-          }
+      if (classification === "allergy_gone" && !needsConfirmation) {
+        if (scope === "entire_family") {
+          console.log('🧠 AI подтвердил, что аллергии прошли у всей семьи — очищаем список аллергий.');
+          shouldApplyFamilyAllergyCleanup = true;
         }
+      } else if (classification === "uncertain" || needsConfirmation) {
+        shouldDeferAllergyUpdatesForConfirmation = true;
+        console.log('⚠️ Контекст неоднозначен — запрошено уточнение перед изменением данных.');
+        const clarificationText = reason
+          ? `${reason} Подтвердите, пожалуйста, прежде чем я обновлю данные.`
+          : "Правильно ли я понимаю, что у вас действительно прошла аллергия? Подтвердите, пожалуйста, прежде чем я обновлю данные.";
+        clarificationNotes.push(clarificationText);
       }
     } catch (intentError) {
       console.error('⚠️ Ошибка при анализе смысла intentPrompt:', intentError);
+    }
+
+    if (shouldDeferAllergyUpdatesForConfirmation) {
+      for (const entry of updatesPerPerson) {
+        entry.add_allergies = [];
+        entry.remove_allergies = [];
+      }
+    }
+
+    if (shouldApplyFamilyAllergyCleanup && !shouldDeferAllergyUpdatesForConfirmation) {
+      if (updatesPerPerson.length === 0) {
+        updatesPerPerson.push({
+          name: "",
+          original_name: "вся семья",
+          resolved_names: [],
+          applies_to_family: true,
+          add_allergies: [],
+          remove_allergies: ["все"],
+          add_dislikes: [],
+          remove_dislikes: [],
+          add_likes: [],
+          remove_likes: [],
+        });
+      } else {
+        for (const entry of updatesPerPerson) {
+          entry.applies_to_family = true;
+          entry.remove_allergies = ["все"];
+        }
+      }
     }
 
 
