@@ -58,6 +58,7 @@ type SupabaseProfile = {
   id: number;
   budget: number | null;
   goals: string | null;
+  family_data: Record<string, any> | null;
 };
 
 type SupabaseFamilyMember = {
@@ -77,7 +78,7 @@ async function getUserDataFromDB(
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("id, budget, goals")
+    .select("id, budget, goals, family_data")
     .eq("user_id", user_id)
     .single();
 
@@ -199,7 +200,7 @@ async function extractBasicInfo(message: string, userId: string) {
     let profile: SupabaseProfile | null = null;
     const { data: profileData, error: profileError } = await supabase
       .from("profiles")
-      .select("id, budget, goals")
+      .select("id, budget, goals, family_data")
       .eq("user_id", userId)
       .maybeSingle();
 
@@ -214,7 +215,7 @@ async function extractBasicInfo(message: string, userId: string) {
       const { data: insertedProfile, error: insertProfileError } = await supabase
         .from("profiles")
         .insert({ user_id: userId })
-        .select("id, budget, goals")
+        .select("id, budget, goals, family_data")
         .maybeSingle();
 
       if (insertProfileError || !insertedProfile) {
@@ -244,14 +245,80 @@ async function extractBasicInfo(message: string, userId: string) {
       console.error("⚠️ Ошибка загрузки текущих членов семьи:", existingMembersError);
     }
 
-    const existingMemberNames = (existingMembersRaw || [])
-      .map((member) => (typeof member?.name === "string" ? member.name.trim() : ""))
+    const trimName = (value: string | null | undefined) =>
+      typeof value === "string" ? value.trim() : "";
+
+    const memberMap = new Map<string, any>();
+    const memberIdMap = new Map<number, any>();
+
+    for (const member of existingMembersRaw || []) {
+      const trimmed = trimName(member?.name);
+      if (trimmed) {
+        memberMap.set(trimmed.toLowerCase(), member);
+      }
+      if (typeof member?.id === "number") {
+        memberIdMap.set(member.id, member);
+      }
+    }
+
+    const existingMemberNames = Array.from(memberMap.values())
+      .map((member) => trimName(member?.name))
       .filter((name) => name.length > 0);
+
+    const profileFamilyData =
+      profileRecord.family_data && typeof profileRecord.family_data === "object"
+        ? { ...profileRecord.family_data }
+        : {};
+
+    let storedPrimaryMemberId: number | null =
+      typeof (profileFamilyData?.primary_member_id as number | undefined) === "number"
+        ? (profileFamilyData.primary_member_id as number)
+        : null;
+    let storedPrimaryMemberName: string =
+      typeof profileFamilyData?.primary_member_name === "string"
+        ? profileFamilyData.primary_member_name.trim()
+        : "";
+
+    let primaryMemberRecord: any | null = null;
+    if (storedPrimaryMemberId != null) {
+      primaryMemberRecord = memberIdMap.get(storedPrimaryMemberId) ?? null;
+      if (!primaryMemberRecord) {
+        storedPrimaryMemberId = null;
+      }
+    }
+    if (!primaryMemberRecord && storedPrimaryMemberName) {
+      const lookup = memberMap.get(storedPrimaryMemberName.toLowerCase()) ?? null;
+      if (lookup) {
+        primaryMemberRecord = lookup;
+        if (typeof lookup?.id === "number") {
+          storedPrimaryMemberId = lookup.id;
+        }
+      } else {
+        storedPrimaryMemberName = "";
+      }
+    }
+    if (!primaryMemberRecord && Array.isArray(existingMembersRaw) && existingMembersRaw.length === 1) {
+      primaryMemberRecord = existingMembersRaw[0] ?? null;
+      if (typeof primaryMemberRecord?.id === "number") {
+        storedPrimaryMemberId = primaryMemberRecord.id;
+      }
+      if (typeof primaryMemberRecord?.name === "string") {
+        storedPrimaryMemberName = primaryMemberRecord.name.trim();
+      }
+    }
 
     const parserKnownMembersSegment =
       existingMemberNames.length > 0
         ? `Известные члены семьи (используй точные имена при совпадении): ${JSON.stringify(existingMemberNames)}.`
         : "Нет известных членов семьи, любые имена уточняй у пользователя.";
+
+    const parserPrimaryMemberSegment =
+      primaryMemberRecord && storedPrimaryMemberName
+        ? `Основной участник (первое лицо): ${storedPrimaryMemberName}. Если сообщение звучит от первого лица («я», «мне», «у меня»), используй именно это имя в resolved_names и укажи target_scope=\"self\".`
+        : "Основной участник, говорящий от первого лица, пока не определён. Если встречаются местоимения «я», «мне», «у меня», попроси пользователя назвать конкретного члена семьи и верни target_scope=\"unknown\" до уточнения.";
+
+    let pendingPrimaryMemberId = storedPrimaryMemberId;
+    let pendingPrimaryMemberName = storedPrimaryMemberName;
 
     // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
@@ -261,6 +328,7 @@ async function extractBasicInfo(message: string, userId: string) {
           role: "system",
           content: `Ты — парсер сообщений пользователя для AI-ассистента питания.
           ${parserKnownMembersSegment}
+          ${parserPrimaryMemberSegment}
           Верни СТРОГО JSON:
           {
             "family_members": [
@@ -270,7 +338,8 @@ async function extractBasicInfo(message: string, userId: string) {
                 "weight": number | null,
                 "likes": string[] | [],
                 "dislikes": string[] | [],
-                "allergies": string[] | []
+                "allergies": string[] | [],
+                "is_primary": boolean | null
               }
             ],
             "budget": number | null,
@@ -280,6 +349,7 @@ async function extractBasicInfo(message: string, userId: string) {
                 "name": string,
                 "resolved_names": string[] | [],
                 "applies_to_family": boolean,
+                "target_scope": "self" | "family" | "named" | "unknown",
                 "add_allergies": string[] | [],
                 "remove_allergies": string[] | [],
                 "add_dislikes": string[] | [],
@@ -290,6 +360,8 @@ async function extractBasicInfo(message: string, userId: string) {
             ]
           }
           Если изменение касается всей семьи или всех существующих участников, установи applies_to_family=true и оставь resolved_names пустым, даже если в сообщении есть обобщенные выражения.
+          При target_scope="family" обязательно ставь applies_to_family=true. При target_scope="self" используй имя основного участника из подсказки, если оно известно. Для target_scope="named" перечисляй конкретных людей в resolved_names. Если нельзя однозначно определить адресата, установи target_scope="unknown" и оставь resolved_names пустым.
+          Если в сообщении становится понятно, кто именно говорит от первого лица, добавь is_primary=true для соответствующей записи в family_members.
           Если можешь сопоставить упомянутое имя с одним из известных членов семьи, перечисли эти имена в resolved_names в точном написании как в списке. Не выдумывай новых членов семьи и не используй роли, если есть совпадение по имени.
           Если не уверен, оставь resolved_names пустым и applies_to_family=false, чтобы ассистент уточнил у пользователя.
           Если упомянуто, что данных нет, передай пустой массив. Никакого текста вне JSON.`
@@ -328,14 +400,27 @@ async function extractBasicInfo(message: string, userId: string) {
     const normalizeName = (value: string | undefined | null): string =>
       typeof value === "string" ? value.trim() : "";
 
-    const memberMap = new Map<string, any>();
-
-    for (const member of existingMembersRaw || []) {
-      const key = normalizeName(member?.name).toLowerCase();
-      if (key) {
-        memberMap.set(key, member);
+    const registerMemberRecord = (record: any) => {
+      if (!record) return;
+      if (typeof record?.id === "number") {
+        memberIdMap.set(record.id, record);
       }
-    }
+      const key = normalizeName(record?.name).toLowerCase();
+      if (key) {
+        memberMap.set(key, record);
+      }
+    };
+
+    const setPrimaryMemberCandidate = (record: any) => {
+      if (!record) return;
+      if (typeof record?.id === "number") {
+        pendingPrimaryMemberId = record.id;
+      }
+      const trimmed = normalizeName(record?.name);
+      if (trimmed) {
+        pendingPrimaryMemberName = trimmed;
+      }
+    };
 
     const isGroupPlaceholder = (rawName: string | undefined | null) => {
       const trimmed = normalizeName(rawName);
@@ -355,20 +440,7 @@ async function extractBasicInfo(message: string, userId: string) {
       );
     };
 
-    const ambiguousNamePlaceholders = new Set([
-      "",
-      "пользователь",
-      "партнер",
-      "партнёр",
-      "я",
-      "сам",
-      "сама",
-      "себя",
-      "меня",
-      "мне",
-      "мной",
-      "мы",
-    ]);
+    const ambiguousNamePlaceholders = new Set([""]);
 
     const isAmbiguousName = (rawName: unknown) => {
       const trimmed = normalizeName(typeof rawName === "string" ? rawName : String(rawName ?? ""));
@@ -428,6 +500,7 @@ async function extractBasicInfo(message: string, userId: string) {
 
       const existing = memberMap.get(key);
       if (existing) {
+        const previousKey = normalizeName(existing?.name).toLowerCase();
         const updatePayload: Record<string, any> = {};
         if ((existing.name || "").trim() !== trimmedName) updatePayload.name = trimmedName;
         if (age !== null) updatePayload.age = age;
@@ -447,7 +520,13 @@ async function extractBasicInfo(message: string, userId: string) {
           if (updateError) {
             console.error(`❌ Ошибка обновления данных ${trimmedName}:`, updateError);
           } else if (updated) {
-            memberMap.set(key, updated);
+            if (previousKey && previousKey !== key) {
+              memberMap.delete(previousKey);
+            }
+            registerMemberRecord(updated);
+            if (snapshot?.is_primary && typeof updated?.id === "number") {
+              setPrimaryMemberCandidate(updated);
+            }
           }
         }
       } else {
@@ -483,7 +562,10 @@ async function extractBasicInfo(message: string, userId: string) {
         if (insertError) {
           console.error(`❌ Ошибка добавления нового члена семьи ${trimmedName}:`, insertError);
         } else if (inserted) {
-          memberMap.set(key, inserted);
+          registerMemberRecord(inserted);
+          if (snapshot?.is_primary && typeof inserted?.id === "number") {
+            setPrimaryMemberCandidate(inserted);
+          }
         }
       }
     };
@@ -523,6 +605,24 @@ async function extractBasicInfo(message: string, userId: string) {
 
     const toProductList = (value: unknown): string[] => normalizeArray(value) || [];
 
+    const normalizeTargetScope = (value: unknown): "self" | "family" | "named" | "unknown" => {
+      if (typeof value !== "string") return "named";
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "self" || normalized === "primary" || normalized === "owner") {
+        return "self";
+      }
+      if (normalized === "family" || normalized === "household" || normalized === "all") {
+        return "family";
+      }
+      if (normalized === "unknown" || normalized === "clarify" || normalized === "unsure") {
+        return "unknown";
+      }
+      if (normalized === "named" || normalized === "specific") {
+        return "named";
+      }
+      return "named";
+    };
+
     const updatesPerPerson: any[] = Array.isArray(data?.updates_per_person)
       ? data.updates_per_person.map((rawUpdate: any) => {
           const trimmedName = normalizeName(rawUpdate?.name);
@@ -532,6 +632,7 @@ async function extractBasicInfo(message: string, userId: string) {
             original_name: originalName,
             resolved_names: normalizeArray(rawUpdate?.resolved_names) || [],
             applies_to_family: Boolean(rawUpdate?.applies_to_family),
+            target_scope: normalizeTargetScope(rawUpdate?.target_scope),
             add_allergies: toProductList(rawUpdate?.add_allergies),
             remove_allergies: toProductList(rawUpdate?.remove_allergies),
             add_dislikes: toProductList(rawUpdate?.add_dislikes),
@@ -635,8 +736,23 @@ async function extractBasicInfo(message: string, userId: string) {
 
 
     const hasResolvedTargets = updatesPerPerson.some((update) => {
-      if (update.applies_to_family && memberMap.size > 0) {
+      if ((update.target_scope === "family" || update.applies_to_family) && memberMap.size > 0) {
         return true;
+      }
+      if (update.target_scope === "self") {
+        if (pendingPrimaryMemberId != null && memberIdMap.has(pendingPrimaryMemberId)) {
+          return true;
+        }
+        if (pendingPrimaryMemberName && memberMap.has(pendingPrimaryMemberName.toLowerCase())) {
+          return true;
+        }
+        if (Array.isArray(update.resolved_names)) {
+          for (const resolved of update.resolved_names) {
+            if (getExistingMemberRecord(resolved, { quiet: true })) {
+              return true;
+            }
+          }
+        }
       }
       if (Array.isArray(update.resolved_names)) {
         for (const resolved of update.resolved_names) {
@@ -674,6 +790,7 @@ async function extractBasicInfo(message: string, userId: string) {
           original_name,
           resolved_names = [],
           applies_to_family = false,
+          target_scope = "named",
           add_allergies = [],
           remove_allergies = [],
           add_dislikes = [],
@@ -683,8 +800,14 @@ async function extractBasicInfo(message: string, userId: string) {
         } = update;
 
         const targetMap = new Map<number, any>();
+        const mention = original_name || name;
 
-        if (applies_to_family) {
+        let effectiveScope: "self" | "family" | "named" | "unknown" = target_scope;
+        if (applies_to_family && effectiveScope !== "self") {
+          effectiveScope = "family";
+        }
+
+        if (effectiveScope === "family") {
           const allMembers = Array.from(memberMap.values());
           if (allMembers.length === 0) {
             console.log('⚠️ Нет членов семьи для группового обновления — пропускаем операцию.');
@@ -700,14 +823,57 @@ async function extractBasicInfo(message: string, userId: string) {
           }
         }
 
-        for (const resolved of resolved_names) {
+        if (effectiveScope === "unknown") {
+          console.log('⚠️ Контекст неоднозначен — запрошено уточнение перед изменением данных.');
+          clarificationNotes.push(
+            mention
+              ? `Не уверена, кого касается изменение «${mention}». Подскажите, пожалуйста, имя человека или уточните, что речь обо всей семье.`
+              : 'Пока не поняла, кого касается это изменение. Укажите, пожалуйста, конкретного участника или скажите, что это для всей семьи.'
+          );
+          continue;
+        }
+
+        let primaryCandidate: any | null = null;
+
+        if (effectiveScope === "self") {
+          for (const resolved of resolved_names) {
+            const candidate = getExistingMemberRecord(resolved, { quiet: true });
+            if (candidate) {
+              primaryCandidate = candidate;
+              break;
+            }
+          }
+          if (!primaryCandidate && pendingPrimaryMemberId != null) {
+            primaryCandidate = memberIdMap.get(pendingPrimaryMemberId) ?? null;
+          }
+          if (!primaryCandidate && pendingPrimaryMemberName) {
+            primaryCandidate = memberMap.get(pendingPrimaryMemberName.toLowerCase()) ?? null;
+          }
+          if (!primaryCandidate && name) {
+            primaryCandidate = getExistingMemberRecord(name, { quiet: true });
+          }
+          if (primaryCandidate?.id != null) {
+            targetMap.set(primaryCandidate.id, primaryCandidate);
+            setPrimaryMemberCandidate(primaryCandidate);
+          } else {
+            console.log('⚠️ Контекст неоднозначен — запрошено уточнение перед изменением данных.');
+            clarificationNotes.push(
+              'Похоже, речь о вас, но я не нашла вашей записи в семье. Подскажите, пожалуйста, как вы записаны, чтобы обновить данные.'
+            );
+            continue;
+          }
+        }
+
+        const resolvedTargets = effectiveScope === "self" ? [] : resolved_names;
+
+        for (const resolved of resolvedTargets) {
           const memberRecord = getExistingMemberRecord(resolved);
           if (memberRecord?.id != null) {
             targetMap.set(memberRecord.id, memberRecord);
           }
         }
 
-        if (!applies_to_family && targetMap.size === 0 && name) {
+        if (effectiveScope !== "family" && targetMap.size === 0 && name) {
           const memberRecord = getExistingMemberRecord(name);
           if (memberRecord?.id != null) {
             targetMap.set(memberRecord.id, memberRecord);
@@ -715,7 +881,6 @@ async function extractBasicInfo(message: string, userId: string) {
         }
 
         if (targetMap.size === 0) {
-          const mention = original_name || name;
           clarificationNotes.push(
             mention
               ? `Пока не понял, кого касается изменение «${mention}». Укажите, пожалуйста, конкретного участника семьи.`
@@ -821,8 +986,49 @@ async function extractBasicInfo(message: string, userId: string) {
     // 4️⃣ Подтягиваем актуальные данные из БД
     const { data: familyMembers } = await supabase
       .from('family_members')
-      .select('name, age, weight, allergies, dislikes, likes')
+      .select('id, name, age, weight, allergies, dislikes, likes')
       .eq('profile_id', profileRecord.id);
+
+    let resolvedPrimaryId = pendingPrimaryMemberId;
+    let resolvedPrimaryName = pendingPrimaryMemberName;
+
+    if (resolvedPrimaryId != null) {
+      const recordById = memberIdMap.get(resolvedPrimaryId) ?? null;
+      if (recordById) {
+        resolvedPrimaryName = normalizeName(recordById?.name) || resolvedPrimaryName;
+      } else {
+        resolvedPrimaryId = null;
+      }
+    }
+    if (resolvedPrimaryId == null && resolvedPrimaryName) {
+      const recordByName = memberMap.get(resolvedPrimaryName.toLowerCase()) ?? null;
+      if (recordByName && typeof recordByName?.id === "number") {
+        resolvedPrimaryId = recordByName.id;
+        resolvedPrimaryName = normalizeName(recordByName?.name) || resolvedPrimaryName;
+      }
+    }
+
+    const normalizedResolvedPrimaryName = resolvedPrimaryName ? resolvedPrimaryName : null;
+    const normalizedStoredPrimaryName = storedPrimaryMemberName ? storedPrimaryMemberName : null;
+
+    const shouldPersistPrimary =
+      (resolvedPrimaryId ?? null) !== (storedPrimaryMemberId ?? null) ||
+      (normalizedResolvedPrimaryName || null) !== (normalizedStoredPrimaryName || null);
+
+    if (shouldPersistPrimary) {
+      const nextFamilyData: Record<string, any> = { ...profileFamilyData };
+      nextFamilyData.primary_member_id = resolvedPrimaryId ?? null;
+      nextFamilyData.primary_member_name = normalizedResolvedPrimaryName;
+      const { error: primaryUpdateError } = await supabase
+        .from('profiles')
+        .update({ family_data: nextFamilyData })
+        .eq('id', profileRecord.id);
+      if (primaryUpdateError) {
+        console.error('⚠️ Не удалось сохранить основного участника семьи:', primaryUpdateError);
+      } else {
+        profileRecord = { ...profileRecord, family_data: nextFamilyData } as SupabaseProfile;
+      }
+    }
 
     // 5️⃣ Формируем финальный ответ исключительно из БД
     let text = `Вот актуальная информация о вашей семье:\n\n`;
