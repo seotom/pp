@@ -235,6 +235,24 @@ async function extractBasicInfo(message: string, userId: string) {
     const clarificationNotes: string[] = [];
     const unknownMembers = new Set<string>();
 
+    const { data: existingMembersRaw, error: existingMembersError } = await supabase
+      .from("family_members")
+      .select("id, name, age, weight, allergies, dislikes, likes")
+      .eq("profile_id", profileRecord.id);
+
+    if (existingMembersError) {
+      console.error("⚠️ Ошибка загрузки текущих членов семьи:", existingMembersError);
+    }
+
+    const existingMemberNames = (existingMembersRaw || [])
+      .map((member) => (typeof member?.name === "string" ? member.name.trim() : ""))
+      .filter((name) => name.length > 0);
+
+    const parserKnownMembersSegment =
+      existingMemberNames.length > 0
+        ? `Известные члены семьи (используй точные имена при совпадении): ${JSON.stringify(existingMemberNames)}.`
+        : "Нет известных членов семьи, любые имена уточняй у пользователя.";
+
     // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -242,6 +260,7 @@ async function extractBasicInfo(message: string, userId: string) {
         {
           role: "system",
           content: `Ты — парсер сообщений пользователя для AI-ассистента питания.
+          ${parserKnownMembersSegment}
           Верни СТРОГО JSON:
           {
             "family_members": [
@@ -259,6 +278,8 @@ async function extractBasicInfo(message: string, userId: string) {
             "updates_per_person": [
               {
                 "name": string,
+                "resolved_names": string[] | [],
+                "applies_to_family": boolean,
                 "add_allergies": string[] | [],
                 "remove_allergies": string[] | [],
                 "add_dislikes": string[] | [],
@@ -268,7 +289,10 @@ async function extractBasicInfo(message: string, userId: string) {
               }
             ]
           }
-          Если имен нет, используйте роли (мама, папа, ребенок 1). Если упомянуто, что данных нет, передай пустой массив. Никакого текста вне JSON.`
+          Если изменение касается всей семьи или всех существующих участников, установи applies_to_family=true и оставь resolved_names пустым, даже если в сообщении есть обобщенные выражения.
+          Если можешь сопоставить упомянутое имя с одним из известных членов семьи, перечисли эти имена в resolved_names в точном написании как в списке. Не выдумывай новых членов семьи и не используй роли, если есть совпадение по имени.
+          Если не уверен, оставь resolved_names пустым и applies_to_family=false, чтобы ассистент уточнил у пользователя.
+          Если упомянуто, что данных нет, передай пустой массив. Никакого текста вне JSON.`
         },
         { role: "user", content: message }
       ],
@@ -305,14 +329,6 @@ async function extractBasicInfo(message: string, userId: string) {
       typeof value === "string" ? value.trim() : "";
 
     const memberMap = new Map<string, any>();
-    const { data: existingMembersRaw, error: existingMembersError } = await supabase
-      .from("family_members")
-      .select("id, name, age, weight, allergies, dislikes, likes")
-      .eq("profile_id", profileRecord.id);
-
-    if (existingMembersError) {
-      console.error("⚠️ Ошибка загрузки текущих членов семьи:", existingMembersError);
-    }
 
     for (const member of existingMembersRaw || []) {
       const key = normalizeName(member?.name).toLowerCase();
@@ -361,12 +377,15 @@ async function extractBasicInfo(message: string, userId: string) {
       return ambiguousNamePlaceholders.has(lower) || isGroupPlaceholder(lower);
     };
 
-    const getExistingMemberRecord = (rawName: string | undefined | null) => {
+    const getExistingMemberRecord = (
+      rawName: string | undefined | null,
+      options: { quiet?: boolean } = {}
+    ) => {
       const trimmedName = normalizeName(rawName);
       if (!trimmedName) return null;
       const key = trimmedName.toLowerCase();
       const cached = memberMap.get(key);
-      if (!cached) {
+      if (!cached && !options.quiet) {
         console.log(`⚠️ Член семьи ${trimmedName} не найден среди существующих записей — пропускаем без авто-создания.`);
         if (trimmedName) {
           unknownMembers.add(trimmedName);
@@ -502,8 +521,25 @@ async function extractBasicInfo(message: string, userId: string) {
       }
     }
 
+    const toProductList = (value: unknown): string[] => normalizeArray(value) || [];
+
     const updatesPerPerson: any[] = Array.isArray(data?.updates_per_person)
-      ? [...data.updates_per_person]
+      ? data.updates_per_person.map((rawUpdate: any) => {
+          const trimmedName = normalizeName(rawUpdate?.name);
+          const originalName = typeof rawUpdate?.name === "string" ? rawUpdate.name : trimmedName;
+          return {
+            name: trimmedName,
+            original_name: originalName,
+            resolved_names: normalizeArray(rawUpdate?.resolved_names) || [],
+            applies_to_family: Boolean(rawUpdate?.applies_to_family),
+            add_allergies: toProductList(rawUpdate?.add_allergies),
+            remove_allergies: toProductList(rawUpdate?.remove_allergies),
+            add_dislikes: toProductList(rawUpdate?.add_dislikes),
+            remove_dislikes: toProductList(rawUpdate?.remove_dislikes),
+            add_likes: toProductList(rawUpdate?.add_likes),
+            remove_likes: toProductList(rawUpdate?.remove_likes),
+          };
+        })
       : [];
 
     // 🧠 AI-driven интерпретация смысла "прошла аллергия"
@@ -530,10 +566,22 @@ async function extractBasicInfo(message: string, userId: string) {
       if (allergyGoneFlag) {
         console.log('🧠 AI определил, что речь о прошедших аллергиях — добавляем remove_allergies=["все"]');
         if (updatesPerPerson.length === 0) {
-          updatesPerPerson.push({ name: 'все', remove_allergies: ['все'] });
+          updatesPerPerson.push({
+            name: "",
+            original_name: "все",
+            resolved_names: [],
+            applies_to_family: true,
+            add_allergies: [],
+            remove_allergies: ["все"],
+            add_dislikes: [],
+            remove_dislikes: [],
+            add_likes: [],
+            remove_likes: [],
+          });
         } else {
           for (const entry of updatesPerPerson) {
-            entry.remove_allergies = ['все'];
+            entry.remove_allergies = ["все"];
+            entry.applies_to_family = true;
           }
         }
       }
@@ -542,133 +590,38 @@ async function extractBasicInfo(message: string, userId: string) {
     }
 
 
-    
 
-    // console.log("🧠 AI-структура:", data);
 
-    // 🧠 Эвристика: если AI вернул "у нас / оба / мы" или имена-плейсхолдеры — применяем ко всем членам семьи
-
-    const groupNameKeywords = [
-      "все",
-      "всем",
-      "вся семья",
-      "всей семье",
-      "вся наша семья",
-      "семья",
-      "для всех",
-      "для всей семьи",
-      "у нас",
-      "оба",
-      "вместе",
-    ];
-
-    const groupMessageKeywords = [...groupNameKeywords, "мы"];
-
-    const normalizedMessage = message.toLowerCase();
-
-    const matchesGroupKeyword = (text: string, keyword: string) => {
-      const normalizedKeyword = keyword.trim().toLowerCase();
-      if (!normalizedKeyword) {
-        return false;
+    const hasResolvedTargets = updatesPerPerson.some((update) => {
+      if (update.applies_to_family && memberMap.size > 0) {
+        return true;
       }
-
-      if (normalizedKeyword.includes(" ")) {
-        return text.includes(normalizedKeyword);
+      if (Array.isArray(update.resolved_names)) {
+        for (const resolved of update.resolved_names) {
+          if (getExistingMemberRecord(resolved, { quiet: true })) {
+            return true;
+          }
+        }
       }
-
-      const escaped = normalizedKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "u");
-      return pattern.test(text);
-    };
-
-    const mentionsGroupByName = updatesPerPerson.some((u: { name: any }) => {
-      const name = String(u.name || "").toLowerCase();
-      if (["пользователь", "партнер", "партнёр"].includes(name)) {
-        return false;
+      if (update.name && getExistingMemberRecord(update.name, { quiet: true })) {
+        return true;
       }
-      return groupNameKeywords.some((keyword) => name.startsWith(keyword));
+      return false;
     });
 
-    const mentionsGroupByMessage = groupMessageKeywords.some((keyword) =>
-      matchesGroupKeyword(normalizedMessage, keyword)
-    );
-
-    const singularPronouns = [
-      "я",
-      "меня",
-      "мне",
-      "мной",
-      "мой",
-      "моя",
-      "моё",
-      "мое",
-      "мои",
-      "сама",
-      "сам",
-    ];
-
-    const hasSingularPronoun = singularPronouns.some((keyword) =>
-      matchesGroupKeyword(normalizedMessage, keyword)
-    );
-
-    const mentionsGroup =
-      (mentionsGroupByName || mentionsGroupByMessage) &&
-      !(hasSingularPronoun && !mentionsGroupByMessage);
-
-    const updatesAllAmbiguous =
-      updatesPerPerson.length === 0 ||
-      updatesPerPerson.every((u: { name: unknown }) => isAmbiguousName(u?.name));
-
-    const shouldSkipPreferenceSnapshots =
-      hasSingularPronoun && !mentionsGroupByMessage && updatesAllAmbiguous;
+    const shouldSkipPreferenceSnapshots = updatesPerPerson.length > 0 && !hasResolvedTargets;
 
     const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
     for (const snapshot of rawSnapshots) {
       await applySnapshotToMember(snapshot, { allowPreferenceChanges: !shouldSkipPreferenceSnapshots });
     }
 
-    if (mentionsGroup) {
-      const { data: allMembersRaw, error: listErr } = await supabase
-        .from('family_members')
-        .select('name')
-        .eq('profile_id', profileRecord.id);
-
-      // Нормализуем в массив, даже если null/undefined
-      const allMembers = Array.isArray(allMembersRaw) ? allMembersRaw : [];
-
-      if (allMembers.length > 0) {
-        const memberNames = allMembers.map(m => m.name);
-        console.log(`🔁 Распознано групповое выражение ("у нас/оба/мы") — применяем ко всем: ${memberNames.join(', ')}`);
-
-        const expandedUpdates: any[] = [];
-        const source = updatesPerPerson.length > 0
-          ? updatesPerPerson
-          : [{}]; // если AI не прислал блок — просто размножим пустые операции (на случай других полей)
-
-        for (const u of source) {
-          for (const name of memberNames) {
-            expandedUpdates.push({ ...u, name });
-          }
-        }
-
-        updatesPerPerson.splice(0, updatesPerPerson.length, ...expandedUpdates);
-      } else {
-        console.log('⚠️ Семейные участники не найдены — невозможно применить групповое обновление');
-      }
-    }
-
-    // 🧩 Если после этого в updates_per_person остались только "пользователь"/"партнер", без имён из БД
-    // 🧩 Если после этого в updates_per_person остались только плейсхолдеры — ничего не меняем (лучше запросить уточнение в ответе чата)
-    if (
-      updatesPerPerson.length > 0 &&
-      updatesPerPerson.every((u: { name: any }) => isAmbiguousName(u?.name))
-    ) {
+    if (shouldSkipPreferenceSnapshots) {
       console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
       clarificationNotes.push(
         'Пока не понял, для кого в семье нужно обновить данные. Уточните, пожалуйста, имя или роль человека, чтобы я мог сохранить изменения.'
       );
       updatesPerPerson.length = 0;
-      // Ничего не сохраняем и продолжаем — текстовый ответ сформирует сам чат-бот.
     }
 
     // 3️⃣ Применяем обновления из updates_per_person
@@ -676,6 +629,9 @@ async function extractBasicInfo(message: string, userId: string) {
       for (const update of updatesPerPerson) {
         const {
           name,
+          original_name,
+          resolved_names = [],
+          applies_to_family = false,
           add_allergies = [],
           remove_allergies = [],
           add_dislikes = [],
@@ -684,8 +640,9 @@ async function extractBasicInfo(message: string, userId: string) {
           remove_likes = [],
         } = update;
 
-        const targets: any[] = [];
-        if (isGroupPlaceholder(name)) {
+        const targetMap = new Map<number, any>();
+
+        if (applies_to_family) {
           const allMembers = Array.from(memberMap.values());
           if (allMembers.length === 0) {
             console.log('⚠️ Нет членов семьи для группового обновления — пропускаем операцию.');
@@ -694,17 +651,38 @@ async function extractBasicInfo(message: string, userId: string) {
             );
             continue;
           }
-          targets.push(...allMembers);
-        } else {
-          const memberRecord = getExistingMemberRecord(name);
-          if (!memberRecord) {
-            console.log(`❌ Член семьи ${name} не найден — обновление пропущено до подтверждения пользователя.`);
-            continue;
+          for (const memberRecord of allMembers) {
+            if (memberRecord?.id != null) {
+              targetMap.set(memberRecord.id, memberRecord);
+            }
           }
-          targets.push(memberRecord);
         }
 
-        for (const memberRecord of targets) {
+        for (const resolved of resolved_names) {
+          const memberRecord = getExistingMemberRecord(resolved);
+          if (memberRecord?.id != null) {
+            targetMap.set(memberRecord.id, memberRecord);
+          }
+        }
+
+        if (!applies_to_family && targetMap.size === 0 && name) {
+          const memberRecord = getExistingMemberRecord(name);
+          if (memberRecord?.id != null) {
+            targetMap.set(memberRecord.id, memberRecord);
+          }
+        }
+
+        if (targetMap.size === 0) {
+          const mention = original_name || name;
+          clarificationNotes.push(
+            mention
+              ? `Пока не понял, кого касается изменение «${mention}». Укажите, пожалуйста, конкретного участника семьи.`
+              : 'Пока не понял, кого касается это изменение. Назовите конкретного человека или скажите, что речь о всей семье.'
+          );
+          continue;
+        }
+
+        for (const memberRecord of targetMap.values()) {
           const updated = {
             allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
             dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
