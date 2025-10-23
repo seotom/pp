@@ -475,6 +475,7 @@ async function extractBasicInfo(message: string, userId: string) {
       if (isGroupPlaceholder(trimmedName)) return;
 
       const key = trimmedName.toLowerCase();
+      const existing = memberMap.get(key);
       const age = toNumberOrNull(snapshot?.age);
       const weight = toNumberOrNull(snapshot?.weight);
       const likesRaw = normalizeArray(snapshot?.likes);
@@ -488,9 +489,30 @@ async function extractBasicInfo(message: string, userId: string) {
       );
 
       const allowPreferences = options.allowPreferenceChanges;
-      const likes = allowPreferences ? likesRaw : null;
-      const dislikes = allowPreferences ? dislikesRaw : null;
-      const allergies = allowPreferences ? allergiesRaw : null;
+      const snapshotObject = (snapshot && typeof snapshot === "object") ? snapshot : {};
+      const hasLikesField = Object.prototype.hasOwnProperty.call(snapshotObject, "likes");
+      const hasDislikesField = Object.prototype.hasOwnProperty.call(snapshotObject, "dislikes");
+      const hasAllergiesField = Object.prototype.hasOwnProperty.call(snapshotObject, "allergies");
+
+      const likes = allowPreferences && hasLikesField
+        ? likesRaw && likesRaw.length > 0
+          ? likesRaw
+          : !existing || !Array.isArray(existing.likes) || existing.likes.length === 0
+            ? []
+            : null
+        : null;
+
+      const dislikes = allowPreferences && hasDislikesField
+        ? dislikesRaw && dislikesRaw.length > 0
+          ? dislikesRaw
+          : !existing || !Array.isArray(existing.dislikes) || existing.dislikes.length === 0
+            ? []
+            : null
+        : null;
+
+      const allergies = allowPreferences && hasAllergiesField
+        ? allergiesRaw
+        : null;
 
       if (!allowPreferences && wantsPreferenceChanges) {
         clarificationNotes.push(
@@ -498,7 +520,6 @@ async function extractBasicInfo(message: string, userId: string) {
         );
       }
 
-      const existing = memberMap.get(key);
       if (existing) {
         const previousKey = normalizeName(existing?.name).toLowerCase();
         const updatePayload: Record<string, any> = {};
