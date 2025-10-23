@@ -1,66 +1,53 @@
 // src\app\api\chat\route.ts
-
 // стабильный фикс
-
 import { NextRequest } from "next/server";
 import OpenAI from "openai";
 import { getSupabaseServer } from "@/lib/supabase";
-
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
-
-const BASE_SYSTEM_PROMPT = `Ты - дружелюбный и умный AI-помощник по семейному питанию.
-
-      ОСНОВНЫЕ ПРАВИЛА:
-      1. Когда пользователь дает полные данные (семья, бюджет, предпочтения, аллергии, цели) - ПРЕДЛАГАЙ генерацию плана питания
-      2. Если данных не хватает - вежливо запроси недостающее
-      3. Подтверждай изменения простыми словами
-      4. Понимай сложные конструкции ("раньше не любил, теперь люблю")
-      5. Отвечай ТОЛЬКО на вопросы по питанию, бюджету, шопинг-листам
-      6. НЕ давай медицинских рекомендаций и диагнозов
-      7. НЕ обсуждай политику, развлечения, технические детали
-      8. При off-topic запросах вежливо возвращай к теме питания
-
-      СОБИРАЙ ДАННЫЕ ПО ШАГАМ ИЗ ВЫШЕУКАЗАННОГО СПИСКА:
-      - Шаг 1: узнай состав семьи (количество, имена или роли, возраст и вес каждого)
-      - Шаг 2: уточни недельный бюджет (в рублях)
-      - Шаг 3: собери любимые и нелюбимые продукты у каждого
-      - Шаг 4: собери пищевые аллергии
-      - Шаг 5: уточни цели питания
-      Не перескакивай через шаги и не перечисляй их все сразу — за один ответ запрашивай или подтверждай только следующий незаполненный шаг.
-
-      КОГДА ПРЕДЛАГАТЬ ПЛАН ПИТАНИЯ:
-      - Есть информация о семье (количество, возраст)
-      - Известен бюджет
-      - Известны предпочтения (что не любят)
-      - Известны аллергии
-      - Известны цели
-
-      ПРИМЕРЫ ЕСТЕСТВЕННЫХ ОТВЕТОВ:
-      - На сложные конструкции: "Понял! Обновляю: добавляю свинину в любимые, убираю курицу из нелюбимых"
-      - На массовые операции: "Хорошо, очищаю все ваши аллергии и предпочтения"
-      - На полный сброс: "Отлично, начинаю с чистого листа!"
-
-      Всегда будь краток, дружелюбен и точен.
-
-      КЛЮЧЕВЫЕ СООБЩЕНИЯ:
-      - Питаться правильно можно даже экономя
-      - Продуманный список покупок - основа здоровья семьи
-      - Покупайте с умом - не отказывайтесь от полезного
-
-      ИСТОЧНИКИ:
-      - Российские нормы питания (МР 2.3.1.0253-21)
-      - Данные о составе продуктов
-      - Усредненные цены российских магазинов`;
-
+const BASE_SYSTEM_PROMPT = `
+  Ты - дружелюбный и умный AI-помощник по семейному питанию. 
+  Твоя задача — помогать пользователю с планированием питания и вести диалог так, чтобы пошагово собрать нужные данные.
+  ОСНОВНЫЕ ПРАВИЛА:
+  1. Сначала последовательно собери полные данные в 5 шагах:
+    Шаг 1 — состав семьи (количество человек, возраст и вес каждого, все пункты обязательны);
+    Шаг 2 — бюджет на неделю (в рублях);
+    Шаг 3 — любимые и нелюбимые продукты;
+    Шаг 4 — аллергии на продукты;
+    Шаг 5 — цели (например: похудеть, улучшить питание, набрать массу, экономить и т.д.).
+  2. Не переходи к следующему шагу, пока не получишь все данные по текущему.
+    Если пользователь отвечает не полностью — вежливо уточни недостающие детали.
+    Если пользователь возвращается к предыдущему шагу — корректно обнови информацию.
+  3. Когда все пять шагов завершены, спокойно сообщи, что всё записано, и переходи в обычный режим общения:
+    помогай с рекомендациями, планом питания, шопинг-листом и т.д.
+  4. Если пользователь сразу присылает полные данные (например, через "ONBOARDING_DATA:" или в одном сообщении),
+    не начинай опрос заново — просто подтверди получение и используй эти данные.
+  5. Когда пользователь даёт полные данные (семья, бюджет, предпочтения, аллергии, цели) — ПРЕДЛАГАЙ генерацию плана питания.
+    Если чего-то не хватает — вежливо запроси недостающее.
+  6. Подтверждай изменения простыми словами.
+    Пример: "Понял! Обновляю: добавляю свинину в любимые, убираю курицу из нелюбимых."
+  7. Понимай сложные конструкции ("раньше не любил, теперь люблю").
+    При противоречиях уточняй, какое состояние актуально.
+  8. Отвечай ТОЛЬКО на вопросы по питанию, бюджету, шопинг-листам.
+    НЕ давай медицинских рекомендаций и диагнозов.
+    НЕ обсуждай политику, развлечения, технические детали.
+    При off-topic запросах вежливо возвращай к теме питания.
+  КЛЮЧЕВЫЕ СООБЩЕНИЯ:
+  - Питаться правильно можно даже экономя.
+  - Продуманный список покупок — основа здоровья семьи.
+  - Покупайте с умом — не отказывайтесь от полезного.
+  ИСТОЧНИКИ:
+  - Российские нормы питания (МР 2.3.1.0253-21).
+  - Данные о составе продуктов.
+  - Усредненные цены российских магазинов.
+`;
 type SupabaseProfile = {
   id: number;
   budget: number | null;
   goals: string | null;
   family_data: Record<string, any> | null;
 };
-
 type SupabaseFamilyMember = {
   name: string | null;
   age: number | null;
@@ -69,47 +56,38 @@ type SupabaseFamilyMember = {
   dislikes: string[] | null;
   likes: string[] | null;
 };
-
 // 🔹 Функция получения актуальных данных из Supabase
 async function getUserDataFromDB(
   user_id: string
 ): Promise<{ profile: SupabaseProfile; family: SupabaseFamilyMember[] } | null> {
   const supabase = getSupabaseServer();
-
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
     .select("id, budget, goals, family_data")
     .eq("user_id", user_id)
     .single();
-
   if (profileError || !profile) {
     console.error("❌ Не удалось найти профиль пользователя:", profileError);
     return null;
   }
-
   const { data: familyMembers, error: familyError } = await supabase
     .from("family_members")
     .select("name, age, weight, allergies, dislikes, likes")
     .eq("profile_id", profile.id);
-
   if (familyError) {
     console.error("❌ Ошибка получения family_members:", familyError);
   }
-
   return {
     profile,
     family: (familyMembers as SupabaseFamilyMember[] | null) || [],
   };
 }
-
 function buildKnownDataSummary(data: Awaited<ReturnType<typeof getUserDataFromDB>>): string {
   if (!data) {
     return "Известных данных пока нет.";
   }
-
   const segments: string[] = [];
   const family = data.family || [];
-
   if (family.length > 0) {
     const memberLines = family
       .map((member, index) => {
@@ -122,35 +100,27 @@ function buildKnownDataSummary(data: Awaited<ReturnType<typeof getUserDataFromDB
         const likes = Array.isArray(member.likes) ? member.likes.join(", ") || "не указаны" : "не указаны";
         const dislikes = Array.isArray(member.dislikes) ? member.dislikes.join(", ") || "не указаны" : "не указаны";
         const allergies = Array.isArray(member.allergies) ? member.allergies.join(", ") || "не указаны" : "не указаны";
-
         return `- ${name}: ${age}, ${weight}. Любимые: ${likes}. Нелюбимые: ${dislikes}. Аллергии: ${allergies}.`;
       })
       .join("\n");
-
     segments.push(`Состав семьи:\n${memberLines}`);
   }
-
   const budgetValue = data.profile?.budget;
   if (typeof budgetValue === "number" && !Number.isNaN(budgetValue)) {
     segments.push(`Бюджет на неделю: ${budgetValue} руб.`);
   }
-
   const goalsValue =
     typeof data.profile?.goals === "string" ? data.profile.goals.trim() : "";
   if (goalsValue.length > 0) {
     segments.push(`Цели: ${goalsValue}.`);
   }
-
   if (segments.length === 0) {
     return "Известных данных пока нет.";
   }
-
   return segments.join("\n");
 }
-
 function buildStepGuidance(data: Awaited<ReturnType<typeof getUserDataFromDB>>): string {
   const family = (data?.family as SupabaseFamilyMember[]) || [];
-
   const hasCompleteFamily =
     family.length > 0 &&
     family.every((member) => {
@@ -159,43 +129,35 @@ function buildStepGuidance(data: Awaited<ReturnType<typeof getUserDataFromDB>>):
       const hasWeight = typeof member.weight === "number" && !Number.isNaN(member.weight);
       return hasName && hasAge && hasWeight;
     });
-
   if (!hasCompleteFamily) {
     return "Шаг 1: сначала уточни состав семьи — сколько человек, их возраст и вес каждого. Если чего-то не хватает, вежливо запроси эти данные.";
   }
-
   const budgetValue = data?.profile?.budget;
   const hasBudget = typeof budgetValue === "number" && !Number.isNaN(budgetValue);
   if (!hasBudget) {
     return "Шаг 2: запроси недельный бюджет семьи на питание в рублях. Не переходи к следующим шагам, пока бюджет не указан.";
   }
-
   const hasPreferences = family.every(
     (member) => Array.isArray(member.likes) && Array.isArray(member.dislikes)
   );
   if (!hasPreferences) {
     return "Шаг 3: уточни любимые и нелюбимые продукты по каждому члену семьи. Можно отметить, если у кого-то нет выраженных предпочтений.";
   }
-
   const hasAllergies = family.every((member) => Array.isArray(member.allergies));
   if (!hasAllergies) {
     return "Шаг 4: попроси перечислить пищевые аллергии или подтвердить, что их нет.";
   }
-
   const goalsValue = typeof data?.profile?.goals === "string" ? data.profile?.goals?.trim() : "";
   const hasGoals = !!goalsValue;
   if (!hasGoals) {
     return "Шаг 5: уточни цели питания (например, экономия, ЗОЖ, похудение). После получения целей предложи сформировать план.";
   }
-
   return "Все шаги выполнены. Поддерживай тему питания и при необходимости предложи составить план питания на основе собранных данных.";
 }
-
 // 🔧 Функция синхронизированного анализа и возврата данных
 async function extractBasicInfo(message: string, userId: string) {
   try {
     const supabase = getSupabaseServer();
-
     // 1️⃣ Получаем профиль или создаём, если его ещё нет
     let profile: SupabaseProfile | null = null;
     const { data: profileData, error: profileError } = await supabase
@@ -203,12 +165,10 @@ async function extractBasicInfo(message: string, userId: string) {
       .select("id, budget, goals, family_data")
       .eq("user_id", userId)
       .maybeSingle();
-
     if (profileError) {
       console.error("❌ Ошибка чтения профиля:", profileError);
       return;
     }
-
     if (profileData) {
       profile = profileData as SupabaseProfile;
     } else {
@@ -217,40 +177,30 @@ async function extractBasicInfo(message: string, userId: string) {
         .insert({ user_id: userId })
         .select("id, budget, goals, family_data")
         .maybeSingle();
-
       if (insertProfileError || !insertedProfile) {
         console.error("❌ Не удалось создать профиль пользователя:", insertProfileError);
         return;
       }
-
       profile = insertedProfile as SupabaseProfile;
     }
-
     if (!profile) {
       console.error("❌ Профиль пользователя остался неинициализированным");
       return;
     }
-
     let profileRecord = profile as SupabaseProfile;
-
     const clarificationNotes: string[] = [];
     const unknownMembers = new Set<string>();
-
     const { data: existingMembersRaw, error: existingMembersError } = await supabase
       .from("family_members")
       .select("id, name, age, weight, allergies, dislikes, likes")
       .eq("profile_id", profileRecord.id);
-
     if (existingMembersError) {
       console.error("⚠️ Ошибка загрузки текущих членов семьи:", existingMembersError);
     }
-
     const trimName = (value: string | null | undefined) =>
       typeof value === "string" ? value.trim() : "";
-
     const memberMap = new Map<string, any>();
     const memberIdMap = new Map<number, any>();
-
     for (const member of existingMembersRaw || []) {
       const trimmed = trimName(member?.name);
       if (trimmed) {
@@ -260,16 +210,13 @@ async function extractBasicInfo(message: string, userId: string) {
         memberIdMap.set(member.id, member);
       }
     }
-
     const existingMemberNames = Array.from(memberMap.values())
       .map((member) => trimName(member?.name))
       .filter((name) => name.length > 0);
-
     const profileFamilyData =
       profileRecord.family_data && typeof profileRecord.family_data === "object"
         ? { ...profileRecord.family_data }
         : {};
-
     let storedPrimaryMemberId: number | null =
       typeof (profileFamilyData?.primary_member_id as number | undefined) === "number"
         ? (profileFamilyData.primary_member_id as number)
@@ -278,7 +225,6 @@ async function extractBasicInfo(message: string, userId: string) {
       typeof profileFamilyData?.primary_member_name === "string"
         ? profileFamilyData.primary_member_name.trim()
         : "";
-
     let primaryMemberRecord: any | null = null;
     if (storedPrimaryMemberId != null) {
       primaryMemberRecord = memberIdMap.get(storedPrimaryMemberId) ?? null;
@@ -306,20 +252,16 @@ async function extractBasicInfo(message: string, userId: string) {
         storedPrimaryMemberName = primaryMemberRecord.name.trim();
       }
     }
-
     const parserKnownMembersSegment =
       existingMemberNames.length > 0
         ? `Известные члены семьи (используй точные имена при совпадении): ${JSON.stringify(existingMemberNames)}.`
         : "Нет известных членов семьи, любые имена уточняй у пользователя.";
-
     const parserPrimaryMemberSegment =
       primaryMemberRecord && storedPrimaryMemberName
         ? `Основной участник (первое лицо): ${storedPrimaryMemberName}. Если сообщение звучит от первого лица («я», «мне», «у меня»), используй именно это имя в resolved_names и укажи target_scope=\"self\".`
         : "Основной участник, говорящий от первого лица, пока не определён. Если встречаются местоимения «я», «мне», «у меня», попроси пользователя назвать конкретного члена семьи и верни target_scope=\"unknown\" до уточнения.";
-
     let pendingPrimaryMemberId = storedPrimaryMemberId;
     let pendingPrimaryMemberName = storedPrimaryMemberName;
-
     // 2️⃣ Анализируем сообщение через AI
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -371,12 +313,9 @@ async function extractBasicInfo(message: string, userId: string) {
       temperature: 0.1,
       response_format: { type: "json_object" },
     });
-
     const raw = response.choices[0]?.message?.content;
     if (!raw) return console.log("AI не вернул данные");
-
     const data = JSON.parse(raw);
-
     const normalizeArray = (value: unknown): string[] | null => {
       if (!Array.isArray(value)) return null;
       return value
@@ -387,7 +326,6 @@ async function extractBasicInfo(message: string, userId: string) {
         })
         .filter((item) => item.length > 0);
     };
-
     const toNumberOrNull = (value: unknown): number | null => {
       if (typeof value === "number" && Number.isFinite(value)) return value;
       if (typeof value === "string" && value.trim().length > 0) {
@@ -396,10 +334,8 @@ async function extractBasicInfo(message: string, userId: string) {
       }
       return null;
     };
-
     const normalizeName = (value: string | undefined | null): string =>
       typeof value === "string" ? value.trim() : "";
-
     const registerMemberRecord = (record: any) => {
       if (!record) return;
       if (typeof record?.id === "number") {
@@ -410,7 +346,6 @@ async function extractBasicInfo(message: string, userId: string) {
         memberMap.set(key, record);
       }
     };
-
     const setPrimaryMemberCandidate = (record: any) => {
       if (!record) return;
       if (typeof record?.id === "number") {
@@ -421,7 +356,6 @@ async function extractBasicInfo(message: string, userId: string) {
         pendingPrimaryMemberName = trimmed;
       }
     };
-
     const isGroupPlaceholder = (rawName: string | undefined | null) => {
       const trimmed = normalizeName(rawName);
       if (!trimmed) return false;
@@ -439,16 +373,13 @@ async function extractBasicInfo(message: string, userId: string) {
         ].includes(lower) || /^(все|вся|оба)(\s|$)/.test(lower)
       );
     };
-
     const ambiguousNamePlaceholders = new Set([""]);
-
     const isAmbiguousName = (rawName: unknown) => {
       const trimmed = normalizeName(typeof rawName === "string" ? rawName : String(rawName ?? ""));
       if (!trimmed) return true;
       const lower = trimmed.toLowerCase();
       return ambiguousNamePlaceholders.has(lower) || isGroupPlaceholder(lower);
     };
-
     const getExistingMemberRecord = (
       rawName: string | undefined | null,
       options: { quiet?: boolean } = {}
@@ -465,7 +396,6 @@ async function extractBasicInfo(message: string, userId: string) {
       }
       return cached || null;
     };
-
     const applySnapshotToMember = async (
       snapshot: any,
       options: { allowPreferenceChanges: boolean }
@@ -473,32 +403,51 @@ async function extractBasicInfo(message: string, userId: string) {
       const trimmedName = normalizeName(snapshot?.name);
       if (!trimmedName) return;
       if (isGroupPlaceholder(trimmedName)) return;
-
       const key = trimmedName.toLowerCase();
+      const existing = memberMap.get(key);
       const age = toNumberOrNull(snapshot?.age);
       const weight = toNumberOrNull(snapshot?.weight);
       const likesRaw = normalizeArray(snapshot?.likes);
       const dislikesRaw = normalizeArray(snapshot?.dislikes);
       const allergiesRaw = normalizeArray(snapshot?.allergies);
-
       const wantsPreferenceChanges = Boolean(
         (likesRaw && likesRaw.length) ||
           (dislikesRaw && dislikesRaw.length) ||
           (allergiesRaw && allergiesRaw.length)
       );
-
       const allowPreferences = options.allowPreferenceChanges;
-      const likes = allowPreferences ? likesRaw : null;
-      const dislikes = allowPreferences ? dislikesRaw : null;
-      const allergies = allowPreferences ? allergiesRaw : null;
-
+      const snapshotObject = (snapshot && typeof snapshot === "object") ? snapshot : {};
+      const hasLikesField = Object.prototype.hasOwnProperty.call(snapshotObject, "likes");
+      const hasDislikesField = Object.prototype.hasOwnProperty.call(snapshotObject, "dislikes");
+      const hasAllergiesField = Object.prototype.hasOwnProperty.call(snapshotObject, "allergies");
+      const likes = allowPreferences && hasLikesField
+        ? likesRaw && likesRaw.length > 0
+          ? likesRaw
+          : !existing || !Array.isArray(existing.likes) || existing.likes.length === 0
+            ? []
+            : null
+        : null;
+      const dislikes = allowPreferences && hasDislikesField
+        ? dislikesRaw && dislikesRaw.length > 0
+          ? dislikesRaw
+          : !existing || !Array.isArray(existing.dislikes) || existing.dislikes.length === 0
+            ? []
+            : null
+        : null;
+      // Для аллергий применяем ту же логику, что и для likes/dislikes:
+      // пустой массив от парсера НЕ затирает существующие данные, если они уже есть.
+      const allergies = allowPreferences && hasAllergiesField
+        ? (allergiesRaw && allergiesRaw.length > 0
+            ? allergiesRaw
+            : !existing || !Array.isArray(existing.allergies) || existing.allergies.length === 0
+              ? []
+              : null)
+        : null;
       if (!allowPreferences && wantsPreferenceChanges) {
         clarificationNotes.push(
           `Я услышал про изменения вкусов, но не понял, кого именно касается фраза «${message}». Уточните имя участника, пожалуйста.`
         );
       }
-
-      const existing = memberMap.get(key);
       if (existing) {
         const previousKey = normalizeName(existing?.name).toLowerCase();
         const updatePayload: Record<string, any> = {};
@@ -508,7 +457,6 @@ async function extractBasicInfo(message: string, userId: string) {
         if (likes !== null) updatePayload.likes = likes;
         if (dislikes !== null) updatePayload.dislikes = dislikes;
         if (allergies !== null) updatePayload.allergies = allergies;
-
         if (Object.keys(updatePayload).length > 0) {
           const { data: updated, error: updateError } = await supabase
             .from("family_members")
@@ -516,7 +464,6 @@ async function extractBasicInfo(message: string, userId: string) {
             .eq("id", existing.id)
             .select("id, name, age, weight, allergies, dislikes, likes")
             .maybeSingle();
-
           if (updateError) {
             console.error(`❌ Ошибка обновления данных ${trimmedName}:`, updateError);
           } else if (updated) {
@@ -534,7 +481,6 @@ async function extractBasicInfo(message: string, userId: string) {
           unknownMembers.add(trimmedName);
           return;
         }
-
         const insertPayload: Record<string, any> = {
           profile_id: profileRecord.id,
           name: trimmedName,
@@ -544,7 +490,6 @@ async function extractBasicInfo(message: string, userId: string) {
         if (likes !== null) insertPayload.likes = likes;
         if (dislikes !== null) insertPayload.dislikes = dislikes;
         if (allergies !== null) insertPayload.allergies = allergies;
-
         if (Object.keys(insertPayload).length <= 2) {
           unknownMembers.add(trimmedName);
           clarificationNotes.push(
@@ -552,13 +497,11 @@ async function extractBasicInfo(message: string, userId: string) {
           );
           return;
         }
-
         const { data: inserted, error: insertError } = await supabase
           .from("family_members")
           .insert(insertPayload)
           .select("id, name, age, weight, allergies, dislikes, likes")
           .maybeSingle();
-
         if (insertError) {
           console.error(`❌ Ошибка добавления нового члена семьи ${trimmedName}:`, insertError);
         } else if (inserted) {
@@ -569,7 +512,6 @@ async function extractBasicInfo(message: string, userId: string) {
         }
       }
     };
-
     const candidateBudget = toNumberOrNull(data?.budget);
     if (candidateBudget !== null) {
       const normalizedBudget = Math.max(0, Math.round(candidateBudget));
@@ -577,14 +519,12 @@ async function extractBasicInfo(message: string, userId: string) {
         .from("profiles")
         .update({ budget: normalizedBudget })
         .eq("id", profileRecord.id);
-
       if (budgetError) {
         console.error("⚠️ Ошибка обновления бюджета:", budgetError);
       } else {
         profileRecord = { ...profileRecord, budget: normalizedBudget } as SupabaseProfile;
       }
     }
-
     let goalsArray = normalizeArray(data?.goals);
     if (!goalsArray && typeof data?.goals === 'string') {
       goalsArray = normalizeArray(data.goals.split(/[;,]/));
@@ -595,16 +535,13 @@ async function extractBasicInfo(message: string, userId: string) {
         .from("profiles")
         .update({ goals: goalsString })
         .eq("id", profileRecord.id);
-
       if (goalsError) {
         console.error("⚠️ Ошибка обновления целей:", goalsError);
       } else {
         profileRecord = { ...profileRecord, goals: goalsString } as SupabaseProfile;
       }
     }
-
     const toProductList = (value: unknown): string[] => normalizeArray(value) || [];
-
     const normalizeTargetScope = (value: unknown): "self" | "family" | "named" | "unknown" => {
       if (typeof value !== "string") return "named";
       const normalized = value.trim().toLowerCase();
@@ -622,7 +559,6 @@ async function extractBasicInfo(message: string, userId: string) {
       }
       return "named";
     };
-
     const updatesPerPerson: any[] = Array.isArray(data?.updates_per_person)
       ? data.updates_per_person.map((rawUpdate: any) => {
           const trimmedName = normalizeName(rawUpdate?.name);
@@ -642,18 +578,15 @@ async function extractBasicInfo(message: string, userId: string) {
           };
         })
       : [];
-
     // 🧠 AI-анализ контекста "прошла ли аллергия"
     let shouldApplyFamilyAllergyCleanup = false;
     let shouldDeferAllergyUpdatesForConfirmation = false;
-
     try {
       const intentPrompt = `
         Ты — аналитик сообщений о питании. Определи, описывает ли пользователь ситуацию,
         в которой пищевая аллергия прошла и данные об аллергии нужно удалить.
         Отличай высказывания о вкусовых предпочтениях ("нравится", "стали есть")
         от сообщений о здоровье.
-
         Верни СТРОГО JSON вида:
         {
           "classification": "allergy_gone" | "no_allergy_context" | "uncertain",
@@ -661,7 +594,6 @@ async function extractBasicInfo(message: string, userId: string) {
           "needs_confirmation": boolean,
           "reason": string
         }
-
         Правила:
         - "allergy_gone" ставь только если явно говорится, что аллергии больше нет или её нужно удалить.
         - "no_allergy_context" используй, если речь идёт о вкусах или теме, не связанной с аллергией.
@@ -669,23 +601,19 @@ async function extractBasicInfo(message: string, userId: string) {
         - Если сообщение охватывает всю семью, выбирай scope="entire_family".
           Если упомянуты конкретные люди, используй "specific_people".
         - reason коротко поясняет вывод на русском языке.
-
         Сообщение пользователя: "${message}"
       `;
-
       const intentResp = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [{ role: "system", content: intentPrompt }],
         temperature: 0,
         response_format: { type: "json_object" },
       });
-
       const parsedIntent = JSON.parse(intentResp.choices[0]?.message?.content || "{}");
       const classification = typeof parsedIntent.classification === "string" ? parsedIntent.classification : "no_allergy_context";
       const scope = typeof parsedIntent.scope === "string" ? parsedIntent.scope : "none";
       const needsConfirmation = Boolean(parsedIntent.needs_confirmation);
       const reason = typeof parsedIntent.reason === "string" ? parsedIntent.reason.trim() : "";
-
       if (classification === "allergy_gone" && !needsConfirmation) {
         if (scope === "entire_family") {
           console.log('🧠 AI подтвердил, что аллергии прошли у всей семьи — очищаем список аллергий.');
@@ -702,14 +630,12 @@ async function extractBasicInfo(message: string, userId: string) {
     } catch (intentError) {
       console.error('⚠️ Ошибка при анализе смысла intentPrompt:', intentError);
     }
-
     if (shouldDeferAllergyUpdatesForConfirmation) {
       for (const entry of updatesPerPerson) {
         entry.add_allergies = [];
         entry.remove_allergies = [];
       }
     }
-
     if (shouldApplyFamilyAllergyCleanup && !shouldDeferAllergyUpdatesForConfirmation) {
       if (updatesPerPerson.length === 0) {
         updatesPerPerson.push({
@@ -731,10 +657,6 @@ async function extractBasicInfo(message: string, userId: string) {
         }
       }
     }
-
-
-
-
     const hasResolvedTargets = updatesPerPerson.some((update) => {
       if ((update.target_scope === "family" || update.applies_to_family) && memberMap.size > 0) {
         return true;
@@ -766,22 +688,23 @@ async function extractBasicInfo(message: string, userId: string) {
       }
       return false;
     });
-
+    // Если парсер сформировал updates_per_person, считаем их источником истины и
+    // не применяем снапшоты предпочтений, чтобы не перезаписать массивы целиком.
+    const forbidPreferenceSnapshots = updatesPerPerson.length > 0;
     const shouldSkipPreferenceSnapshots = updatesPerPerson.length > 0 && !hasResolvedTargets;
-
     const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
     for (const snapshot of rawSnapshots) {
-      await applySnapshotToMember(snapshot, { allowPreferenceChanges: !shouldSkipPreferenceSnapshots });
+      await applySnapshotToMember(snapshot, { allowPreferenceChanges: hasResolvedTargets ? false : true });
     }
-
     if (shouldSkipPreferenceSnapshots) {
       console.log('🤔 Не удалось точно определить, кто из членов семьи упомянут — пропускаем сохранение до уточнения пользователя');
       clarificationNotes.push(
         'Пока не понял, для кого в семье нужно обновить данные. Уточните, пожалуйста, имя или роль человека, чтобы я мог сохранить изменения.'
       );
-      updatesPerPerson.length = 0;
+      if (!hasResolvedTargets) {
+        updatesPerPerson.length = 0;
+      }
     }
-
     // 3️⃣ Применяем обновления из updates_per_person
     if (updatesPerPerson.length > 0) {
       for (const update of updatesPerPerson) {
@@ -798,15 +721,12 @@ async function extractBasicInfo(message: string, userId: string) {
           add_likes = [],
           remove_likes = [],
         } = update;
-
         const targetMap = new Map<number, any>();
         const mention = original_name || name;
-
         let effectiveScope: "self" | "family" | "named" | "unknown" = target_scope;
         if (applies_to_family && effectiveScope !== "self") {
           effectiveScope = "family";
         }
-
         if (effectiveScope === "family") {
           const allMembers = Array.from(memberMap.values());
           if (allMembers.length === 0) {
@@ -822,7 +742,6 @@ async function extractBasicInfo(message: string, userId: string) {
             }
           }
         }
-
         if (effectiveScope === "unknown") {
           console.log('⚠️ Контекст неоднозначен — запрошено уточнение перед изменением данных.');
           clarificationNotes.push(
@@ -832,9 +751,7 @@ async function extractBasicInfo(message: string, userId: string) {
           );
           continue;
         }
-
         let primaryCandidate: any | null = null;
-
         if (effectiveScope === "self") {
           for (const resolved of resolved_names) {
             const candidate = getExistingMemberRecord(resolved, { quiet: true });
@@ -863,23 +780,19 @@ async function extractBasicInfo(message: string, userId: string) {
             continue;
           }
         }
-
         const resolvedTargets = effectiveScope === "self" ? [] : resolved_names;
-
         for (const resolved of resolvedTargets) {
           const memberRecord = getExistingMemberRecord(resolved);
           if (memberRecord?.id != null) {
             targetMap.set(memberRecord.id, memberRecord);
           }
         }
-
         if (effectiveScope !== "family" && targetMap.size === 0 && name) {
           const memberRecord = getExistingMemberRecord(name);
           if (memberRecord?.id != null) {
             targetMap.set(memberRecord.id, memberRecord);
           }
         }
-
         if (targetMap.size === 0) {
           clarificationNotes.push(
             mention
@@ -888,16 +801,31 @@ async function extractBasicInfo(message: string, userId: string) {
           );
           continue;
         }
-
         for (const memberRecord of targetMap.values()) {
           const updated = {
             allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
             dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
-            likes: [...(Array.isArray(memberRecord.likes) ? memberRecord.likes : [])],
+          likes: [...(Array.isArray(memberRecord.likes) ? memberRecord.likes : [])],
           };
-
+          // Инференс замены: если текст содержит «замен» и есть add_likes,
+          // но remove_likes пуст, то попробуем удалить те likes, которые явно
+          // упомянуты в сообщении, и не совпадают с добавляемыми.
+          const __userText = String(message || '').toLowerCase();
+          let addLikes = add_likes;
+          let removeLikes = remove_likes;
+          if (/замен/i.test(__userText) && Array.isArray(addLikes) && addLikes.length > 0 && Array.isArray(removeLikes) && removeLikes.length === 0) {
+            const inferred: string[] = [];
+            for (const likeItem of updated.likes) {
+              const low = String(likeItem || '').toLowerCase();
+              if (low && __userText.includes(low) && !addLikes.includes(likeItem)) {
+                inferred.push(likeItem);
+              }
+            }
+            if (inferred.length) {
+              removeLikes = Array.from(new Set([...(removeLikes || []), ...inferred]));
+            }
+          }
           // Добавления и удаления с автоматическим контролем взаимных связей
-
           // ✅ Аллергии
           if (add_allergies.length) {
             for (const a of add_allergies) {
@@ -918,7 +846,6 @@ async function extractBasicInfo(message: string, userId: string) {
               console.log(`❌ Удаляем конкретные аллергии у ${memberRecord.name}: ${remove_allergies.join(', ')}`);
             }
           }
-
           // ✅ Нелюбимые продукты
           if (add_dislikes.length) {
             for (const d of add_dislikes) {
@@ -930,26 +857,22 @@ async function extractBasicInfo(message: string, userId: string) {
           if (remove_dislikes.length) {
             updated.dislikes = updated.dislikes.filter(d => !remove_dislikes.includes(d));
           }
-
           // ✅ Любимые продукты
-          if (add_likes.length) {
-            for (const l of add_likes) {
+          if (addLikes.length) {
+            for (const l of addLikes) {
               if (!updated.likes.includes(l)) updated.likes.push(l);
               // Удаляем из dislikes и allergies, если продукт был там
               updated.dislikes = updated.dislikes.filter(d => d !== l);
               updated.allergies = updated.allergies.filter(a => a !== l);
             }
           }
-          if (remove_likes.length) {
-            updated.likes = updated.likes.filter(l => !remove_likes.includes(l));
+          if (removeLikes.length) {
+            updated.likes = updated.likes.filter(l => !removeLikes.includes(l));
           }
-
-
           // Убираем пересечения
           updated.allergies = [...new Set(updated.allergies.filter(a => !updated.likes.includes(a) && !updated.dislikes.includes(a)))];
           updated.dislikes = [...new Set(updated.dislikes.filter(d => !updated.likes.includes(d) && !updated.allergies.includes(d)))];
           updated.likes = [...new Set(updated.likes.filter(l => !updated.dislikes.includes(l) && !updated.allergies.includes(l)))];
-
           const { data: savedMember, error } = await supabase
             .from('family_members')
             .update({
@@ -960,7 +883,6 @@ async function extractBasicInfo(message: string, userId: string) {
             .eq('id', memberRecord.id)
             .select('id, name, age, weight, allergies, dislikes, likes')
             .maybeSingle();
-
           const targetName = memberRecord.name || name;
           if (error) {
             console.error(`Ошибка обновления ${targetName}:`, error);
@@ -973,7 +895,6 @@ async function extractBasicInfo(message: string, userId: string) {
         }
       }
     }
-
     if (unknownMembers.size > 0) {
       const unknownList = Array.from(unknownMembers)
         .map((name) => `«${name}»`)
@@ -982,16 +903,13 @@ async function extractBasicInfo(message: string, userId: string) {
         `Пока не нашёл в вашей семье участника ${unknownList}. Напишите, пожалуйста, точное имя или добавьте его отдельным шагом.`
       );
     }
-
     // 4️⃣ Подтягиваем актуальные данные из БД
     const { data: familyMembers } = await supabase
       .from('family_members')
       .select('id, name, age, weight, allergies, dislikes, likes')
       .eq('profile_id', profileRecord.id);
-
     let resolvedPrimaryId = pendingPrimaryMemberId;
     let resolvedPrimaryName = pendingPrimaryMemberName;
-
     if (resolvedPrimaryId != null) {
       const recordById = memberIdMap.get(resolvedPrimaryId) ?? null;
       if (recordById) {
@@ -1007,14 +925,11 @@ async function extractBasicInfo(message: string, userId: string) {
         resolvedPrimaryName = normalizeName(recordByName?.name) || resolvedPrimaryName;
       }
     }
-
     const normalizedResolvedPrimaryName = resolvedPrimaryName ? resolvedPrimaryName : null;
     const normalizedStoredPrimaryName = storedPrimaryMemberName ? storedPrimaryMemberName : null;
-
     const shouldPersistPrimary =
       (resolvedPrimaryId ?? null) !== (storedPrimaryMemberId ?? null) ||
       (normalizedResolvedPrimaryName || null) !== (normalizedStoredPrimaryName || null);
-
     if (shouldPersistPrimary) {
       const nextFamilyData: Record<string, any> = { ...profileFamilyData };
       nextFamilyData.primary_member_id = resolvedPrimaryId ?? null;
@@ -1029,10 +944,8 @@ async function extractBasicInfo(message: string, userId: string) {
         profileRecord = { ...profileRecord, family_data: nextFamilyData } as SupabaseProfile;
       }
     }
-
     // 5️⃣ Формируем финальный ответ исключительно из БД
     let text = `Вот актуальная информация о вашей семье:\n\n`;
-
     for (const m of familyMembers || []) {
       text += `**${m.name}**\n`;
       text += `- Возраст: ${typeof m.age === 'number' ? `${m.age} лет` : 'не указан'}\n`;
@@ -1041,30 +954,23 @@ async function extractBasicInfo(message: string, userId: string) {
       text += `- Нелюбимые продукты: ${m.dislikes?.join(', ') || 'нет'}\n`;
       text += `- Аллергии: ${m.allergies?.join(', ') || 'нет'}\n\n`;
     }
-
     if (profileRecord.budget) text += `**Бюджет:** ${profileRecord.budget} руб.\n`;
     if (profileRecord.goals) text += `**Цели:** ${profileRecord.goals}\n`;
-
     // console.log("💬 Итоговый ответ сформирован из БД:", text);
-
     if (clarificationNotes.length > 0) {
       const uniqueNotes = Array.from(new Set(clarificationNotes));
       text = `${uniqueNotes.join('\n\n')}\n\n${text}`;
     }
-
     return { content: text };
   } catch (err) {
     console.error("Ошибка в extractBasicInfo:", err);
   }
 }
-
-
 // Сохранение в diet_facts
 async function saveToDietFacts(profileId: number, memberId: number, member: any) {
   try {
     const supabase = getSupabaseServer();
     const now = new Date().toISOString();
-
     // Сохраняем аллергии
     for (const allergy of member.allergies || []) {
       if (!allergy) continue;
@@ -1086,12 +992,10 @@ async function saveToDietFacts(profileId: number, memberId: number, member: any)
         }, {
           onConflict: 'profile_id,member_id,subject_scope,category,canonical'
         });
-
       if (error) {
         console.error('Ошибка сохранения аллергии в diet_facts:', error);
       }
     }
-
     // Сохраняем dislikes
     for (const dislike of member.dislikes || []) {
       if (!dislike) continue;
@@ -1113,12 +1017,10 @@ async function saveToDietFacts(profileId: number, memberId: number, member: any)
         }, {
           onConflict: 'profile_id,member_id,subject_scope,category,canonical'
         });
-
       if (error) {
         console.error('Ошибка сохранения dislike в diet_facts:', error);
       }
     }
-
     // Сохраняем likes
     for (const like of member.likes || []) {
       if (!like) continue;
@@ -1140,41 +1042,33 @@ async function saveToDietFacts(profileId: number, memberId: number, member: any)
         }, {
           onConflict: 'profile_id,member_id,subject_scope,category,canonical'
         });
-
       if (error) {
         console.error('Ошибка сохранения like в diet_facts:', error);
       }
     }
-
     console.log('Данные сохранены в diet_facts для member_id:', memberId);
-
   } catch (error) {
     console.error('Ошибка в saveToDietFacts:', error);
   }
 }
-
 // 🔹 ОБРАБОТКА ИНФОРМАЦИОННЫХ ЗАПРОСОВ (например: "Покажи мне информацию о семье")
 async function handleInfoRequest(userId: string) {
   const supabase = getSupabaseServer();
-
   // Получаем профиль
   const { data: profile } = await supabase
     .from('profiles')
     .select('id, budget, goals')
     .eq('user_id', userId)
     .single();
-
   if (!profile) {
     console.log('Профиль не найден для user_id:', userId);
     return { content: "Профиль не найден" };
   }
-
   // Получаем членов семьи
   const { data: familyMembers } = await supabase
     .from('family_members')
     .select('name, age, weight, likes, dislikes, allergies')
     .eq('profile_id', profile.id);
-
   // Формируем текстовый ответ для чата
   let familyText = '';
   if (familyMembers && familyMembers.length > 0) {
@@ -1189,12 +1083,9 @@ async function handleInfoRequest(userId: string) {
   } else {
     familyText = 'Информация о членах семьи отсутствует.';
   }
-
   const budgetText = profile.budget ? `- **Бюджет на неделю:** ${profile.budget} рублей\n` : '';
   const goalsText = profile.goals ? `- **Цели:** ${profile.goals}\n` : '';
-
   const content = `Вот актуальная информация о вашей семье:\n\n### Состав семьи:\n${familyText}### Общая информация:\n${budgetText}${goalsText}`;
-
   // Возвращаем объект JSON для UI
   return {
     content,
@@ -1203,21 +1094,17 @@ async function handleInfoRequest(userId: string) {
     goals: profile.goals ? profile.goals.split(',').map((g: string) => g.trim()) : []
   };
 }
-
-
 // ✅ Основной обработчик POST /api/chat
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const messages = body?.messages || [];
     const user_id = body?.user_id;
-
     console.log("Получен запрос chat:", {
       user_id,
       messagesCount: messages.length,
       lastMessage: messages[messages.length - 1]?.content,
     });
-
     const lastUserMessage = messages.filter((m: { role: string }) => m.role === "user").pop()?.content ?? "";
     const userData = user_id ? await getUserDataFromDB(user_id) : null;
     const stepGuidance = buildStepGuidance(userData);
@@ -1228,7 +1115,6 @@ export async function POST(req: NextRequest) {
       `Известные данные профиля: ${knownDataSummary}`,
       "Всегда поддерживай последовательность шагов и не переходи к следующему, пока предыдущий не закрыт.",
     ].join("\n\n");
-
     // 🔹 Если запрос информационный — сразу отдаём из БД
     if (/покажи|информация|предпочтения|семья|профиль/i.test(lastUserMessage)) {
       console.log("🔹 Информационный запрос, подставляем данные из БД");
@@ -1241,27 +1127,40 @@ export async function POST(req: NextRequest) {
         },
       });
     }
-
     // 🔹 Обычный сценарий — с обновлениями
+    if (user_id && lastUserMessage) {
+      try {
+        await extractBasicInfo(lastUserMessage, user_id);
+      } catch (err) {
+        console.error("❌ Ошибка предварительной синхронизации профиля:", err);
+      }
+    }
+    const _freshData = user_id ? await getUserDataFromDB(user_id) : null;
+    const _step = buildStepGuidance(_freshData);
+    const _known = buildKnownDataSummary(_freshData);
+    const effectiveSystemMessageContent = [
+      BASE_SYSTEM_PROMPT,
+      `Шаги и что осталось заполнить: ${_step}`,
+      `Известные данные из профиля: ${_known}`,
+      "Отвечай, опираясь на эти данные. Если чего-то не хватает — уточняй у пользователя, но не выдумывай.",
+    ].join("\n\n");
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const encoder = new TextEncoder();
         try {
           const completion = await openai.chat.completions.create({
             model: "gpt-4o-mini",
-            messages: [{ role: "system", content: systemMessageContent }, ...messages],
+            messages: [{ role: "system", content: effectiveSystemMessageContent }, ...messages],
             temperature: 0.7,
             stream: true,
           });
-
           for await (const part of completion) {
             const delta = part.choices[0]?.delta?.content || "";
             if (delta) {
               controller.enqueue(encoder.encode(delta));
             }
           }
-
-          if (user_id && lastUserMessage) {
+          if (false && user_id && lastUserMessage) {
             extractBasicInfo(lastUserMessage, user_id).catch((err) =>
               console.error("Ошибка в extractBasicInfo:", err)
             );
@@ -1274,7 +1173,6 @@ export async function POST(req: NextRequest) {
         }
       },
     });
-
     return new Response(stream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
