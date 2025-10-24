@@ -1,4 +1,5 @@
 // src\lib\supabase.ts
+// Назначение: Утилиты для работы с Supabase
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 

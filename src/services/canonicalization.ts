@@ -1,4 +1,5 @@
 // src\services\canonicalization.ts
+// Нормализация названий продуктов питания к единому каноническому виду
 
 export class CanonicalizationService {
   private map: Record<string, string> = {
