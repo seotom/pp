@@ -1,9 +1,10 @@
 // src/services/info-handler.service.ts
-// Назначение: Обработка информационных запросов пользователя
-
 import { getSupabaseServer } from "@/lib/supabase";
+import { CanonicalizationService } from "./canonicalization";
 
 export class InfoHandlerService {
+  private canonicalizationService = new CanonicalizationService();
+
   async handleInfoRequest(userId: string): Promise<{ content: string; family?: any[]; budget?: number | null; goals?: string[] }> {
     const supabase = getSupabaseServer();
     
@@ -28,9 +29,15 @@ export class InfoHandlerService {
         familyText += `${index + 1}. **${member.name}**\n`;
         familyText += member.age ? `   - Возраст: ${member.age} лет\n` : '';
         familyText += member.weight ? `   - Вес: ${member.weight} кг\n` : '';
-        familyText += `   - Любимые продукты: ${member.likes?.join(', ') || 'нет данных'}\n`;
-        familyText += `   - Нелюбимые продукты: ${member.dislikes?.join(', ') || 'нет данных'}\n`;
-        familyText += `   - Аллергии: ${member.allergies?.join(', ') || 'нет аллергий'}\n\n`;
+        
+        // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - НОРМАЛИЗАЦИЯ ПРИ ОТОБРАЖЕНИИ
+        const normalizedLikes = this.canonicalizationService.canonicalizeList(member.likes || []);
+        const normalizedDislikes = this.canonicalizationService.canonicalizeList(member.dislikes || []);
+        const normalizedAllergies = this.canonicalizationService.canonicalizeList(member.allergies || []);
+        
+        familyText += `   - Любимые продукты: ${normalizedLikes.join(', ') || 'нет данных'}\n`;
+        familyText += `   - Нелюбимые продукты: ${normalizedDislikes.join(', ') || 'нет данных'}\n`;
+        familyText += `   - Аллергии: ${normalizedAllergies.join(', ') || 'нет аллергий'}\n\n`;
       });
     } else {
       familyText = 'Информация о членах семьи отсутствует.';

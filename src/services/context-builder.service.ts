@@ -1,18 +1,18 @@
 // src/services/context-builder.service.ts
-// Назначение: Построение контекста для AI-ассистента
-
 import { DatabaseService } from "./database.service";
 import { UserData } from "@/types/chat.types";
+import { CanonicalizationService } from "./canonicalization";
 
 export class ContextBuilderService {
   private databaseService = new DatabaseService();
+  private canonicalizationService = new CanonicalizationService();
 
   private BASE_SYSTEM_PROMPT = `
   Ты - дружелюбный и умный AI-помощник по семейному питанию. 
   Твоя задача — помогать пользователю с планированием питания и вести диалог так, чтобы пошагово собрать нужные данные.
   ОСНОВНЫЕ ПРАВИЛА:
   1. Сначала последовательно собери полные данные в 5 шагах:
-    Шаг 1 — состав семьи (количество человек, их именя, возраст и вес каждого, все пункты обязательны);
+    Шаг 1 — состав семьи (количество человек, возраст и вес каждого, все пункты обязательны);
     Шаг 2 — бюджет на неделю (в рублях);
     Шаг 3 — любимые и нелюбимые продукты;
     Шаг 4 — аллергии на продукты;
@@ -25,7 +25,7 @@ export class ContextBuilderService {
   4. Если пользователь сразу присылает полные данные (например, через "ONBOARDING_DATA:" или в одном сообщении),
     не начинай опрос заново — просто подтверди получение и используй эти данные.
   5. Когда пользователь даёт полные данные (семья, бюджет, предпочтения, аллергии, цели) — ПРЕДЛАГАЙ генерацию плана питания.
-    Если чего-то не хватает — вежливо запроси недостающее.
+    Если чего-то не хватаеn — вежливо запроси недостающее.
   6. Подтверждай изменения простыми словами.
     Пример: "Понял! Обновляю: добавляю свинину в любимые, убираю курицу из нелюбимых."
   7. Понимай сложные конструкции ("раньше не любил, теперь люблю").
@@ -58,9 +58,16 @@ export class ContextBuilderService {
           const name = member.name || `Участник ${index + 1}`;
           const age = typeof member.age === "number" && !Number.isNaN(member.age) ? `${member.age} лет` : "возраст не указан";
           const weight = typeof member.weight === "number" && !Number.isNaN(member.weight) ? `${member.weight} кг` : "вес не указан";
-          const likes = Array.isArray(member.likes) ? member.likes.join(", ") || "не указаны" : "не указаны";
-          const dislikes = Array.isArray(member.dislikes) ? member.dislikes.join(", ") || "не указаны" : "не указаны";
-          const allergies = Array.isArray(member.allergies) ? member.allergies.join(", ") || "не указаны" : "не указаны";
+          
+          // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - НОРМАЛИЗАЦИЯ ПРИ ОТОБРАЖЕНИИ
+          const normalizedLikes = this.canonicalizationService.canonicalizeList(member.likes || []);
+          const normalizedDislikes = this.canonicalizationService.canonicalizeList(member.dislikes || []);
+          const normalizedAllergies = this.canonicalizationService.canonicalizeList(member.allergies || []);
+          
+          const likes = normalizedLikes.join(", ") || "не указаны";
+          const dislikes = normalizedDislikes.join(", ") || "не указаны";
+          const allergies = normalizedAllergies.join(", ") || "не указаны";
+          
           return `- ${name}: ${age}, ${weight}. Любимые: ${likes}. Нелюбимые: ${dislikes}. Аллергии: ${allergies}.`;
         })
         .join("\n");

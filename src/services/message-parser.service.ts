@@ -1,9 +1,8 @@
 // src/services/message-parser.service.ts
-// Назначение: Парсинг и анализ сообщений пользователя с помощью AI
-
 import OpenAI from "openai";
 import { getSupabaseServer } from "@/lib/supabase";
 import { DatabaseService } from "./database.service";
+import { CanonicalizationService } from "./canonicalization";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
@@ -11,9 +10,13 @@ const openai = new OpenAI({
 
 export class MessageParserService {
   private databaseService = new DatabaseService();
+  private canonicalizationService = new CanonicalizationService();
 
   async extractBasicInfo(message: string, userId: string): Promise<{ content: string } | void> {
     try {
+      // Включить AI для лучшей нормализации при парсинге
+      this.canonicalizationService.enableAI();
+      
       const supabase = getSupabaseServer();
       const nowIso = new Date().toISOString();
 
@@ -304,29 +307,29 @@ export class MessageParserService {
         const hasDislikesField = Object.prototype.hasOwnProperty.call(snapshotObject, "dislikes");
         const hasAllergiesField = Object.prototype.hasOwnProperty.call(snapshotObject, "allergies");
 
-        const likes = allowPreferences && hasLikesField
-          ? likesRaw && likesRaw.length > 0
-            ? likesRaw
-            : !existing || !Array.isArray(existing.likes) || existing.likes.length === 0
-              ? []
-              : null
-          : null;
+        // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - НОРМАЛИЗАЦИЯ ПРЕДПОЧТЕНИЙ
+        const updatePayload: Record<string, any> = {};
+        if ((existing?.name || "").trim() !== trimmedName) updatePayload.name = trimmedName;
+        if (age !== null) updatePayload.age = age;
+        if (weight !== null) updatePayload.weight = weight;
 
-        const dislikes = allowPreferences && hasDislikesField
-          ? dislikesRaw && dislikesRaw.length > 0
-            ? dislikesRaw
-            : !existing || !Array.isArray(existing.dislikes) || existing.dislikes.length === 0
-              ? []
-              : null
-          : null;
-
-        const allergies = allowPreferences && hasAllergiesField
-          ? (allergiesRaw && allergiesRaw.length > 0
-              ? allergiesRaw
-              : !existing || !Array.isArray(existing.allergies) || existing.allergies.length === 0
-                ? []
-                : null)
-          : null;
+        if (allowPreferences) {
+          if (hasLikesField) {
+            updatePayload.likes = likesRaw && likesRaw.length > 0
+              ? await this.canonicalizationService.canonicalizeListAsync(likesRaw)
+              : (!existing || !Array.isArray(existing.likes) || existing.likes.length === 0 ? [] : null);
+          }
+          if (hasDislikesField) {
+            updatePayload.dislikes = dislikesRaw && dislikesRaw.length > 0
+              ? await this.canonicalizationService.canonicalizeListAsync(dislikesRaw)
+              : (!existing || !Array.isArray(existing.dislikes) || existing.dislikes.length === 0 ? [] : null);
+          }
+          if (hasAllergiesField) {
+            updatePayload.allergies = allergiesRaw && allergiesRaw.length > 0
+              ? await this.canonicalizationService.canonicalizeListAsync(allergiesRaw)
+              : (!existing || !Array.isArray(existing.allergies) || existing.allergies.length === 0 ? [] : null);
+          }
+        }
 
         if (!allowPreferences && wantsPreferenceChanges) {
           clarificationNotes.push(
@@ -336,13 +339,6 @@ export class MessageParserService {
 
         if (existing) {
           const previousKey = normalizeName(existing?.name).toLowerCase();
-          const updatePayload: Record<string, any> = {};
-          if ((existing.name || "").trim() !== trimmedName) updatePayload.name = trimmedName;
-          if (age !== null) updatePayload.age = age;
-          if (weight !== null) updatePayload.weight = weight;
-          if (likes !== null) updatePayload.likes = likes;
-          if (dislikes !== null) updatePayload.dislikes = dislikes;
-          if (allergies !== null) updatePayload.allergies = allergies;
           
           if (Object.keys(updatePayload).length > 0) {
             const { data: updated, error: updateError } = await supabase
@@ -377,9 +373,9 @@ export class MessageParserService {
           
           if (age !== null) insertPayload.age = age;
           if (weight !== null) insertPayload.weight = weight;
-          if (likes !== null) insertPayload.likes = likes;
-          if (dislikes !== null) insertPayload.dislikes = dislikes;
-          if (allergies !== null) insertPayload.allergies = allergies;
+          if (updatePayload.likes !== null) insertPayload.likes = updatePayload.likes;
+          if (updatePayload.dislikes !== null) insertPayload.dislikes = updatePayload.dislikes;
+          if (updatePayload.allergies !== null) insertPayload.allergies = updatePayload.allergies;
           
           if (Object.keys(insertPayload).length <= 2) {
             unknownMembers.add(trimmedName);
@@ -616,7 +612,7 @@ export class MessageParserService {
         }
       }
 
-      // 3️⃣ Применяем обновления из updates_per_person
+      // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - ОБРАБОТКА UPDATES_PER_PERSON
       if (updatesPerPerson.length > 0) {
         for (const update of updatesPerPerson) {
           const {
@@ -632,6 +628,14 @@ export class MessageParserService {
             add_likes = [],
             remove_likes = [],
           } = update;
+          
+          // НОРМАЛИЗАЦИЯ ПРОДУКТОВ В ОБНОВЛЕНИЯХ
+          const normalizedAddAllergies = await this.canonicalizationService.canonicalizeListAsync(add_allergies);
+          const normalizedRemoveAllergies = await this.canonicalizationService.canonicalizeListAsync(remove_allergies);
+          const normalizedAddDislikes = await this.canonicalizationService.canonicalizeListAsync(add_dislikes);
+          const normalizedRemoveDislikes = await this.canonicalizationService.canonicalizeListAsync(remove_dislikes);
+          const normalizedAddLikes = await this.canonicalizationService.canonicalizeListAsync(add_likes);
+          const normalizedRemoveLikes = await this.canonicalizationService.canonicalizeListAsync(remove_likes);
           
           const targetMap = new Map<number, any>();
           const mention = original_name || name;
@@ -729,8 +733,8 @@ export class MessageParserService {
             };
             
             const __userText = String(message || '').toLowerCase();
-            let addLikes = add_likes;
-            let removeLikes = remove_likes;
+            let addLikes = normalizedAddLikes;
+            let removeLikes = normalizedRemoveLikes;
             
             if (/замен/i.test(__userText) && Array.isArray(addLikes) && addLikes.length > 0 && Array.isArray(removeLikes) && removeLikes.length === 0) {
               const inferred: string[] = [];
@@ -747,8 +751,8 @@ export class MessageParserService {
             
             // Добавления и удаления с автоматическим контролем взаимных связей
             // ✅ Аллергии
-            if (add_allergies.length) {
-              for (const a of add_allergies) {
+            if (normalizedAddAllergies.length) {
+              for (const a of normalizedAddAllergies) {
                 if (!updated.allergies.includes(a)) updated.allergies.push(a);
                 // Удаляем из likes и dislikes, если есть пересечение
                 updated.likes = updated.likes.filter(l => l !== a);
@@ -756,29 +760,29 @@ export class MessageParserService {
               }
             }
             
-            if (remove_allergies.length) {
-              if (remove_allergies.includes('все')) {
+            if (normalizedRemoveAllergies.length) {
+              if (normalizedRemoveAllergies.includes('все')) {
                 // 🧹 Полное очищение аллергий
                 console.log(`🧹 Полностью очищаем аллергии у ${memberRecord.name}`);
                 updated.allergies = [];
               } else {
                 // Точечное удаление указанных аллергий
-                updated.allergies = updated.allergies.filter(a => !remove_allergies.includes(a));
-                console.log(`❌ Удаляем конкретные аллергии у ${memberRecord.name}: ${remove_allergies.join(', ')}`);
+                updated.allergies = updated.allergies.filter(a => !normalizedRemoveAllergies.includes(a));
+                console.log(`❌ Удаляем конкретные аллергии у ${memberRecord.name}: ${normalizedRemoveAllergies.join(', ')}`);
               }
             }
             
             // ✅ Нелюбимые продукты
-            if (add_dislikes.length) {
-              for (const d of add_dislikes) {
+            if (normalizedAddDislikes.length) {
+              for (const d of normalizedAddDislikes) {
                 if (!updated.dislikes.includes(d)) updated.dislikes.push(d);
                 // Удаляем из likes, если продукт туда попадал
                 updated.likes = updated.likes.filter(l => l !== d);
               }
             }
             
-            if (remove_dislikes.length) {
-              updated.dislikes = updated.dislikes.filter(d => !remove_dislikes.includes(d));
+            if (normalizedRemoveDislikes.length) {
+              updated.dislikes = updated.dislikes.filter(d => !normalizedRemoveDislikes.includes(d));
             }
             
             // ✅ Любимые продукты
@@ -888,9 +892,15 @@ export class MessageParserService {
         text += `**${m.name}**\n`;
         text += `- Возраст: ${typeof m.age === 'number' ? `${m.age} лет` : 'не указан'}\n`;
         text += `- Вес: ${typeof m.weight === 'number' ? `${m.weight} кг` : 'не указан'}\n`;
-        text += `- Любимые продукты: ${m.likes?.join(', ') || 'нет'}\n`;
-        text += `- Нелюбимые продукты: ${m.dislikes?.join(', ') || 'нет'}\n`;
-        text += `- Аллергии: ${m.allergies?.join(', ') || 'нет'}\n\n`;
+        
+        // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - НОРМАЛИЗАЦИЯ ПРИ ОТОБРАЖЕНИИ
+        const normalizedLikes = this.canonicalizationService.canonicalizeList(m.likes || []);
+        const normalizedDislikes = this.canonicalizationService.canonicalizeList(m.dislikes || []);
+        const normalizedAllergies = this.canonicalizationService.canonicalizeList(m.allergies || []);
+        
+        text += `- Любимые продукты: ${normalizedLikes.join(', ') || 'нет'}\n`;
+        text += `- Нелюбимые продукты: ${normalizedDislikes.join(', ') || 'нет'}\n`;
+        text += `- Аллергии: ${normalizedAllergies.join(', ') || 'нет'}\n\n`;
       }
       
       if (profileRecord.budget) text += `**Бюджет:** ${profileRecord.budget} руб.\n`;

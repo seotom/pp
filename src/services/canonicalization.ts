@@ -1,6 +1,12 @@
 // src\services\canonicalization.ts
 // Нормализация названий продуктов питания к единому каноническому виду
 
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
+
 export class CanonicalizationService {
   private map: Record<string, string> = {
     // овощи/фрукты
@@ -61,26 +67,68 @@ export class CanonicalizationService {
     return key;
   }
 
-  // AI-powered нормализация продукта
+  // 🔧 ИСПРАВЛЕНИЕ: Прямой вызов OpenAI вместо fetch
   private async canonicalizeWithAI(item: string): Promise<string> {
     try {
-      const response = await fetch('/api/canonicalize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item })
+      const prompt = `Нормализуй название продукта питания к каноничной форме на русском языке.
+
+                      Правила нормализации:
+                      - Приведи к единственному числу (помидоры → помидор)
+                      - Убери уменьшительно-ласкательные суффиксы (яблочки → яблоко)
+                      - Приведи к стандартному названию (сёмга → лосось, картошка → картофель)
+                      - Группируй похожие продукты (все виды капусты → капуста)
+                      - Сохрани основное значение продукта
+
+                      Примеры:
+                      - "помидоры" → "помидор"
+                      - "яблочки" → "яблоко"
+                      - "сёмга" → "лосось"
+                      - "овсяные хлопья" → "овсяная крупа"
+                      - "белокочанная капуста" → "капуста"
+
+                      ВАЖНО: Верни ТОЛЬКО каноничную форму продукта, без пояснений, кавычек и других символов.
+
+                      Продукт: "${item}"
+                      Каноничная форма:`;
+
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 50,
+        temperature: 0.1,
       });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      
-      const data = await response.json();
-      return data.canonical || item;
+
+      // const canonical = response.choices[0]?.message?.content?.trim() || item;
+
+      let canonical = response.choices[0]?.message?.content?.trim() || item;
+      // 🔧 ИСПРАВЛЕНИЕ: Очистка ответа от лишнего текста
+      canonical = this.cleanAIResponse(canonical);
+      const cleaned = this.cleanAIResponse(canonical);
+
+      console.log(`AI canonicalization: "${item}" → "${canonical}" → "${cleaned}"`);
+
+      return canonical.toLowerCase();
     } catch (error) {
       console.warn('AI canonicalization failed:', error);
       return item; // Fallback к оригинальному названию
     }
   }
+
+  // 🔧 НОВЫЙ МЕТОД: Очистка ответа AI
+  private cleanAIResponse(response: string): string {
+    if (!response) return '';
+    
+    // Удаляем фразы типа "каноничная форма:", "ответ:", и т.д.
+    let cleaned = response
+      .replace(/^(каноничная форма|canonical form|ответ|answer)[:\s]*/i, '')
+      .replace(/^["'](.+)["']$/, '$1') // Удаляем обрамляющие кавычки
+      .replace(/^[«»"'](.+)[«»"']$/, '$1') // Удаляем другие типы кавычек
+      .trim();
+    
+    // Если после очистки пусто, возвращаем оригинал
+    return cleaned || response;
+  }
+
 
   // Синхронная версия (использует кэш)
   canonicalize(item: string): string {
