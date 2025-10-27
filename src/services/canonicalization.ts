@@ -107,6 +107,7 @@ export class CanonicalizationService {
 
       console.log(`AI canonicalization: "${item}" → "${canonical}" → "${cleaned}"`);
 
+
       return canonical.toLowerCase();
     } catch (error) {
       console.warn('AI canonicalization failed:', error);

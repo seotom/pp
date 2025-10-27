@@ -179,6 +179,11 @@ export class MessageParserService {
                 }
               ]
             }
+            
+            Если предпочтения индивидуальные (только для одного человека), 
+            НЕ используй target_scope='family' и applies_to_family=true.
+            Используй target_scope='named' и указывай конкретные имена в resolved_names.
+            
             Если изменение касается всей семьи или всех существующих участников, установи applies_to_family=true и оставь resolved_names пустым, даже если в сообщении есть обобщенные выражения.
             При target_scope="family" обязательно ставь applies_to_family=true. При target_scope="self" используй имя основного участника из подсказки, если оно известно. Для target_scope="named" перечисляй конкретных людей в resolved_names. Если нельзя однозначно определить адресата, установи target_scope="unknown" и оставь resolved_names пустым.
             Если в сообщении становится понятно, кто именно говорит от первого лица, добавь is_primary=true для соответствующей записи в family_members.
@@ -194,7 +199,9 @@ export class MessageParserService {
 
       const raw = response.choices[0]?.message?.content;
       if (!raw) return console.log("AI не вернул данные");
-      
+
+      console.log('🔍 RAW AI RESPONSE:', raw);
+            
       const data = JSON.parse(raw);
 
       const normalizeArray = (value: unknown): string[] | null => {
@@ -599,7 +606,17 @@ export class MessageParserService {
       
       const rawSnapshots: any[] = Array.isArray(data?.family_members) ? data.family_members : [];
       for (const snapshot of rawSnapshots) {
-        await applySnapshotToMember(snapshot, { allowPreferenceChanges: hasResolvedTargets ? false : true });
+        await applySnapshotToMember(snapshot, { 
+            allowPreferenceChanges: !shouldSkipPreferenceSnapshots 
+        });
+        console.log('📝 AFTER SNAPSHOT PROCESSING - memberMap:', 
+            Array.from(memberMap.entries()).map(([k, v]) => ({ 
+                key: k, 
+                name: v.name, 
+                likes: v.likes, 
+                dislikes: v.dislikes 
+            }))
+        );
       }
 
       if (shouldSkipPreferenceSnapshots) {
@@ -615,6 +632,7 @@ export class MessageParserService {
       // 🔄 ИНТЕГРАЦИЯ CANONICALIZATION SERVICE - ОБРАБОТКА UPDATES_PER_PERSON
       if (updatesPerPerson.length > 0) {
         for (const update of updatesPerPerson) {
+          const targetMap = new Map<number, any>();
           const {
             name,
             original_name,
@@ -628,6 +646,9 @@ export class MessageParserService {
             add_likes = [],
             remove_likes = [],
           } = update;
+
+        console.log('🔄 STARTING UPDATES_PERSON PROCESSING, count:', updatesPerPerson.length);
+        console.log('🔧 PROCESSING UPDATE FOR:', update.name, 'target_scope:', update.target_scope);
           
           // НОРМАЛИЗАЦИЯ ПРОДУКТОВ В ОБНОВЛЕНИЯХ
           const normalizedAddAllergies = await this.canonicalizationService.canonicalizeListAsync(add_allergies);
@@ -637,7 +658,6 @@ export class MessageParserService {
           const normalizedAddLikes = await this.canonicalizationService.canonicalizeListAsync(add_likes);
           const normalizedRemoveLikes = await this.canonicalizationService.canonicalizeListAsync(remove_likes);
           
-          const targetMap = new Map<number, any>();
           const mention = original_name || name;
           let effectiveScope: "self" | "family" | "named" | "unknown" = target_scope;
           
@@ -726,6 +746,7 @@ export class MessageParserService {
           }
           
           for (const memberRecord of targetMap.values()) {
+            console.log('   APPLYING TO MEMBER:', memberRecord.name); 
             const updated = {
               allergies: [...(Array.isArray(memberRecord.allergies) ? memberRecord.allergies : [])],
               dislikes: [...(Array.isArray(memberRecord.dislikes) ? memberRecord.dislikes : [])],
