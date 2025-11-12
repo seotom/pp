@@ -1,3 +1,5 @@
+// src\lib\supabase-browser.ts
+
 import { createBrowserClient } from "@supabase/ssr";
 
 import type { Database } from "@/types/database";

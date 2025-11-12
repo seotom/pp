@@ -1,3 +1,5 @@
+// src\modules\parser\types.ts
+
 import type { IntentPayload, IntentUpdateOperation } from "@/modules/intent-analyzer/types";
 import type { FamilyMemberRow, ProfileRow } from "@/types/database";
 
@@ -11,6 +13,7 @@ export type ResolvedMemberUpdate = {
   memberIds: number[];
   scope: "family" | "member";
   requestedName?: string;
+  nameUpdate?: string;  // ✅ НОВОЕ: для обновления имени
   operations: Pick<
     IntentUpdateOperation,
     | "add_allergies"
@@ -19,12 +22,14 @@ export type ResolvedMemberUpdate = {
     | "remove_allergies"
     | "remove_dislikes"
     | "remove_likes"
+    | "age"
+    | "weight"
   >;
 };
 
 export type PendingClarification = {
   message: string;
-  requestedName?: string;
+  requestedName: string | undefined | null;
   target_scope: IntentUpdateOperation["target_scope"];
   operations: ResolvedMemberUpdate["operations"];
 };
@@ -32,14 +37,17 @@ export type PendingClarification = {
 export type ResolvedIntent = {
   profile: ProfileRecord;
   familyMembers: FamilyMemberRecord[];
-  newMembers: ParsedIntent["family_members"];
+  newMembers: ParsedIntent["family_members"] | Partial<FamilyMemberRow>[];
+  membersToDelete: FamilyMemberRecord[];  // ✅ НОВОЕ: для удаления членов
   updates: ResolvedMemberUpdate[];
   clarifications: PendingClarification[];
   budget: number | null | undefined;
+  mentioned_salary: number | null | undefined;
   goals?: string[];
 };
 
 export type ClarificationState = {
+  primary_member_id?: number;  // ✅ НОВОЕ: ID основного представителя
   pending_clarification?: {
     message: string;
     timestamp: string;

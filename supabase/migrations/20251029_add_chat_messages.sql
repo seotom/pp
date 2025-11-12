@@ -1,3 +1,5 @@
+-- supabase\migrations\20251029_add_chat_messages.sql
+
 -- Создание таблицы для истории чата
 create table if not exists public.chat_messages (
     id serial primary key,

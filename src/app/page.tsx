@@ -1,4 +1,6 @@
-﻿"use client";
+﻿// src\app\page.tsx
+
+"use client";
 
 import {
   useRef,
@@ -325,7 +327,7 @@ export default function HomePage() {
               <AnimatePresence>
                 {messages.length === 0 ? (
                   <p className="text-sm text-zinc-500">
-                    После входа напишите, например: «Наша семья из четырёх человек, у двоих аллергия на орехи».
+                    После входа напишите вводное сообщение о своей семье, например: «Семья состоит из 4 человек: Ваня, Лена, Марк и Майя».
                   </p>
                 ) : (
                   messages.map((msg) => (

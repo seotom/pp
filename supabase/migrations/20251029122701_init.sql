@@ -1,3 +1,5 @@
+-- supabase\migrations\20251029122701_init.sql
+
 -- Create table profiles
 create table if not exists public.profiles (
     id serial primary key,

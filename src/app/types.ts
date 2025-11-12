@@ -1,4 +1,4 @@
-﻿// src\modules\intent-analyzer\types.ts
+﻿// src\app\types.ts
 
 import { z } from "zod";
 
@@ -16,12 +16,16 @@ export const updateOperationSchema = z.object({
   resolved_names: z.array(z.string()).default([]),
   applies_to_family: z.boolean().default(false),
   target_scope: z.enum(["family", "self", "named", "unknown"]),
+
+  // списковые операции
   add_allergies: z.array(z.string()).default([]),
   add_likes: z.array(z.string()).default([]),
   add_dislikes: z.array(z.string()).default([]),
   remove_allergies: z.array(z.string()).default([]),
   remove_likes: z.array(z.string()).default([]),
   remove_dislikes: z.array(z.string()).default([]),
+
+  // 🔥 новые поля — чтобы модель могла прислать возраст/вес прямо в апдейте
   age: z.number().int().min(0).nullable().optional(),
   weight: z.number().int().min(0).nullable().optional(),
 });
@@ -29,9 +33,7 @@ export const updateOperationSchema = z.object({
 export const intentSchema = z
   .object({
     family_members: z.array(memberSchema).default([]),
-    members_to_delete: z.array(z.string()).default([]),  // ✅ НОВОЕ
     budget: z.number().int().nullable().optional(),
-    mentioned_salary: z.number().int().nullable().optional(),
     goals: z.array(z.string()).optional(),
     updates_per_person: z.array(updateOperationSchema).default([]),
   })
@@ -76,19 +78,8 @@ export const intentJsonSchema = {
       },
       default: [],
     },
-    members_to_delete: {  // ✅ НОВОЕ
-      type: "array",
-      items: { type: "string" },
-      description: "Names of family members to delete from the family",
-      default: [],
-    },
     budget: {
       type: ["integer", "null"],
-      description: "Weekly food budget in rubles (ONLY if user explicitly states weekly budget)",
-    },
-    mentioned_salary: {
-      type: ["integer", "null"],
-      description: "Monthly or yearly salary mentioned by user (NOT the weekly budget)",
     },
     goals: {
       type: "array",
@@ -145,6 +136,8 @@ export const intentJsonSchema = {
             items: { type: "string" },
             default: [],
           },
+
+          // 👇 добавили в JSON Schema тоже
           age: { type: ["integer", "null"] },
           weight: { type: ["integer", "null"] },
         },
@@ -159,6 +152,7 @@ export const intentJsonSchema = {
           "remove_allergies",
           "remove_likes",
           "remove_dislikes",
+          // 👇 и эти тоже, чтобы OpenAI точно присылал
           "age",
           "weight",
         ],
@@ -166,7 +160,7 @@ export const intentJsonSchema = {
       default: [],
     },
   },
-  required: ["family_members", "members_to_delete", "budget", "mentioned_salary", "goals", "updates_per_person"],  // ✅ ДОБАВИЛИ
+  required: ["family_members", "budget", "goals", "updates_per_person"],
 };
 
 /**

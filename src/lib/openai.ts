@@ -1,3 +1,5 @@
+// src\lib\openai.ts
+
 import OpenAI from "openai";
 
 import { getEnv } from "@/lib/env";

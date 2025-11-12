@@ -1,3 +1,5 @@
+// src\modules\canonicalization\index.ts
+
 import type {
   PendingClarification,
   ResolvedIntent,
@@ -20,6 +22,8 @@ function canonicaliseUpdate(update: ResolvedMemberUpdate): ResolvedMemberUpdate 
     remove_allergies: dedupe(update.operations.remove_allergies),
     remove_dislikes: dedupe(update.operations.remove_dislikes),
     remove_likes: dedupe(update.operations.remove_likes),
+    age: update.operations.age,
+    weight: update.operations.weight,
   };
 
   return {
@@ -45,9 +49,11 @@ function canonicaliseClarification(
 }
 
 export function canonicalizeFoodItems(intent: ResolvedIntent): ResolvedIntent {
-  const canonicalNewMembers = intent.newMembers.map((member) => ({
+  const canonicalNewMembers = intent.newMembers
+  .filter((member) => member.name)
+  .map((member) => ({
     ...member,
-    name: member.name.trim(),
+    name: member.name!.trim(),  // ✅ ! говорит TypeScript, что это гарантированно string
     likes: dedupe(member.likes ?? []),
     dislikes: dedupe(member.dislikes ?? []),
     allergies: dedupe(member.allergies ?? []),

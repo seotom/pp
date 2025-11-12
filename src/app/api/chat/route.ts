@@ -1,4 +1,6 @@
-﻿import { NextResponse } from "next/server";
+﻿// src\app\api\chat\route.ts
+
+import { NextResponse } from "next/server";
 import { z } from "zod";
 import { parseUserMessage } from "@/modules/parser";
 import { getSupabaseServerClient } from "@/lib/supabase-server";

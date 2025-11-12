@@ -1,3 +1,5 @@
+// src\app\api\messages\clear\route.ts
+
 import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 

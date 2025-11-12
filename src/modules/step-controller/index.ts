@@ -1,3 +1,5 @@
+// src\modules\step-controller\index.ts
+
 import { getSupabaseServiceRoleClient } from "@/lib/supabase";
 import type { ProfileRow, FamilyMemberRow } from "@/types/database";
 
@@ -24,7 +26,7 @@ type StepCheckResult = {
 };
 
 export async function checkStepProgress(
-  userId: string,
+  userId: string
 ): Promise<StepCheckResult> {
   const supabase = getSupabaseServiceRoleClient();
 
@@ -39,14 +41,24 @@ export async function checkStepProgress(
     throw new Error("Профиль не найден");
   }
 
+  // ✅ Приведение типа для профиля
+  const typedProfile = profile as ProfileRow;
+
   // 2. грузим членов семьи
-  const { data: members = [] } = await supabase
+  const { data: members, error: membersError } = await supabase
     .from("family_members")
     .select("*")
-    .eq("profile_id", profile.id);
+    .eq("profile_id", typedProfile.id);
+
+  if (membersError) {
+    throw membersError;
+  }
+
+  // ✅ Приведение типа и гарантируем, что это массив
+  const typedMembers = (members ?? []) as FamilyMemberRow[];
 
   // 3. приводим family_data к нормальному виду
-  const raw = (profile.family_data as any) ?? {};
+  const raw = (typedProfile.family_data as any) ?? {};
   const progress: StepProgress = {
     family: raw.progress?.family ?? false,
     primaryMember: raw.progress?.primaryMember ?? false,
@@ -59,8 +71,8 @@ export async function checkStepProgress(
   // 4. логика шагов
 
   // шаг 1 — состав семьи
-  if (!progress.family || members.length === 0) {
-    return { nextStep: "family", profile, members };
+  if (!progress.family || typedMembers.length === 0) {
+    return { nextStep: "family", profile: typedProfile, members: typedMembers };
   }
 
   // шаг 2 — выбор первичного лица
@@ -70,37 +82,49 @@ export async function checkStepProgress(
       : undefined;
 
   if (!progress.primaryMember || !primaryMemberId) {
-    return { nextStep: "primary_member", profile, members };
+    return {
+      nextStep: "primary_member",
+      profile: typedProfile,
+      members: typedMembers,
+    };
   }
 
   // шаг 3 — бюджет
-  if (!progress.budget || !profile.budget) {
-    return { nextStep: "budget", profile, members };
+  if (!progress.budget || !typedProfile.budget) {
+    return { nextStep: "budget", profile: typedProfile, members: typedMembers };
   }
 
   // шаг 4 — предпочтения
   if (!progress.likes) {
-    return { nextStep: "likes", profile, members };
+    return { nextStep: "likes", profile: typedProfile, members: typedMembers };
   }
 
   // шаг 5 — аллергии
   if (!progress.allergies) {
-    return { nextStep: "allergies", profile, members };
+    return {
+      nextStep: "allergies",
+      profile: typedProfile,
+      members: typedMembers,
+    };
   }
 
   // шаг 6 — цели
-  if (!progress.goals || !profile.goals) {
-    return { nextStep: "goals", profile, members };
+  if (!progress.goals || !typedProfile.goals) {
+    return { nextStep: "goals", profile: typedProfile, members: typedMembers };
   }
 
   // всё собрано
-  return { nextStep: "complete", profile, members };
+  return {
+    nextStep: "complete",
+    profile: typedProfile,
+    members: typedMembers,
+  };
 }
 
 // ✅ отмечаем, что состав семьи собран
 export async function markFamilyStepComplete(profileId: number) {
   const supabase = getSupabaseServiceRoleClient();
-  const { error } = await supabase.rpc("update_family_progress", {
+  const { error } = await (supabase.rpc as any)("update_family_progress", {
     p_profile_id: profileId,
   });
   if (error) {
@@ -112,10 +136,10 @@ export async function markFamilyStepComplete(profileId: number) {
 // ✅ отмечаем, кто первичный член семьи
 export async function markPrimaryMemberStepComplete(
   profileId: number,
-  memberId: number,
+  memberId: number
 ) {
   const supabase = getSupabaseServiceRoleClient();
-  const { error } = await supabase.rpc("update_primary_member", {
+  const { error } = await (supabase.rpc as any)("update_primary_member", {
     p_profile_id: profileId,
     p_member_id: memberId,
   });
@@ -128,10 +152,10 @@ export async function markPrimaryMemberStepComplete(
 // ✅ отметить завершение шага "бюджет"
 export async function markBudgetStepComplete(
   profileId: number,
-  budget: number,
+  budget: number
 ) {
   const supabase = getSupabaseServiceRoleClient();
-  const { error } = await supabase.rpc("update_budget_progress", {
+  const { error } = await (supabase.rpc as any)("update_budget_progress", {
     p_profile_id: profileId,
     p_budget: budget,
   });
@@ -140,4 +164,3 @@ export async function markBudgetStepComplete(
     throw error;
   }
 }
-
