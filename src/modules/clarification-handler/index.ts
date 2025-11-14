@@ -48,7 +48,8 @@ export async function handleClarification(
   context: ClarificationContext,
 ): Promise<ClarificationResult> {
   const supabase = getSupabaseServiceRoleClient();
-  const { intent, message } = context;
+  // const { intent, message } = context;
+  let { intent, message } = context; // Используем let, так как будем менять intent
 
   const currentFamilyData =
     (intent.profile.family_data as ClarificationState | null) ?? {};

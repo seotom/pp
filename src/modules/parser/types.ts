@@ -10,6 +10,7 @@ export type FamilyMemberRecord = FamilyMemberRow;
 export type ProfileRecord = ProfileRow;
 
 export type ResolvedMemberUpdate = {
+  target_scope: string;
   memberIds: number[];
   scope: "family" | "member";
   requestedName?: string;

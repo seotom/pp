@@ -1,4 +1,4 @@
-﻿// src\modules\parser\index.ts
+﻿// src/modules/parser/index.ts
 
 import { buildChatPrompt } from "@/modules/prompt-builder";
 import {
@@ -17,6 +17,7 @@ import {
   markFamilyStepComplete,
 } from "@/modules/step-controller";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase";
+import type { FamilyMemberRow } from "@/types/database"; // Импортируем тип
 
 type ParseUserMessageResult = {
   content: string;
@@ -36,55 +37,58 @@ async function buildProfileContext(userId: string): Promise<string> {
     return "";
   }
 
-  // ✅ НОВОЕ: Загружаем членов семьи ОТДЕЛЬНО с фильтром по profile_id
+  // Загружаем членов семьи ОТДЕЛЬНО с фильтром по profile_id
   const { data: familyMembers } = await supabase
     .from("family_members")
-    .select("id, name, age, weight")
+    .select("*") // <--- Загружаем всё
     .eq("profile_id", profile.id);
 
-  let context = "";
-  const members = familyMembers || [];
+  const members = (familyMembers as FamilyMemberRow[] | null) || [];
   const familyData = profile.family_data as any;
+
+  let contextLines: string[] = [];
 
   console.log("📋 Building profile context:", {
     profileId: profile.id,
     membersCount: members.length,
-    memberNames: members.map((m) => m.name),
+    memberNames: members.map((m: FamilyMemberRow) => m.name),
   });
 
-  // Состав семьи
   if (members.length > 0) {
-    context += `✅ Семья (${members.length}): ${members
-      .map((m: any) => `${m.name} (${m.age} лет, ${m.weight} кг)`)
-      .join(", ")}\n`;
+    const memberDetails = members.map((m: FamilyMemberRow) => {
+        let details = `${m.name} (${m.age ?? 'возраст не указан'} лет, ${m.weight ?? 'вес не указан'} кг)`;
+        const prefs = [];
+        if (m.likes?.length) prefs.push(`любит: ${m.likes.join(', ')}`);
+        if (m.dislikes?.length) prefs.push(`не любит: ${m.dislikes.join(', ')}`);
+        if (m.allergies?.length) prefs.push(`аллергия: ${m.allergies.join(', ')}`);
+        if (prefs.length) details += ` | ${prefs.join('; ')}`;
+        return details;
+    }).join('\n'); // Используем '\n' для лучшей читаемости
+    contextLines.push(`✅ Семья (${members.length}):\n${memberDetails}`);
   } else {
-    context += "❌ Семья: не указана\n";
+    contextLines.push("❌ Семья: не указана");
   }
 
-  // Основной представитель
   if (familyData?.primary_member_id) {
-    const primaryMember = members.find(
-      (m: any) => m.id === familyData.primary_member_id
-    );
+    const primaryMember = members.find((m: FamilyMemberRow) => m.id === familyData.primary_member_id);
     if (primaryMember) {
-      context += `✅ Основной представитель: ${primaryMember.name}\n`;
+      contextLines.push(`✅ Основной представитель: ${primaryMember.name}`);
     }
   }
 
-  // Бюджет
   if (profile.budget) {
-    context += `✅ Бюджет на неделю: ${profile.budget} ₽\n`;
+    contextLines.push(`✅ Бюджет на неделю: ${profile.budget} ₽`);
   } else {
-    context += "❌ Бюджет: не указан\n";
+    contextLines.push("❌ Бюджет: не указан");
   }
 
-  // Цели
   if (profile.goals && Array.isArray(profile.goals) && profile.goals.length > 0) {
-    context += `✅ Цели: ${profile.goals.join(", ")}\n`;
+    contextLines.push(`✅ Цели: ${profile.goals.join(", ")}`);
   }
 
-  return context;
+  return contextLines.join("\n\n"); // Разделяем блоки двойным переводом строки
 }
+
 
 export async function parseUserMessage(
   message: string,
@@ -133,11 +137,11 @@ export async function parseUserMessage(
     return { content: responseMessage };
   }
 
-  // ✅ НОВОЕ: Загружаем историю
+  // Загружаем историю
   const history = await loadConversationHistory(userId, 5);
   const historyForPrompt = formatHistoryForPrompt(history);
 
-  // ✅ НОВОЕ: Загружаем контекст профиля
+  // Загружаем контекст профиля
   const profileContext = await buildProfileContext(userId);
 
   // 🔹 2. обычная ветка: отправляем в OpenAI с контекстом
@@ -153,6 +157,12 @@ export async function parseUserMessage(
     userId,
     intent,
   });
+  
+  // Если это 'read' action, мы доверяем aiMessage, который был сгенерирован на основе ПОЛНОГО контекста
+  // и немедленно возвращаем его.
+  if (intent.action_type === 'read') {
+    return { content: aiMessage || "Вот информация по вашему запросу." };
+  }
 
   console.log("🔍 DEBUG resolvedIntent.newMembers:", resolvedIntent.newMembers);
   console.log("🔍 DEBUG resolvedIntent.membersToDelete:", resolvedIntent.membersToDelete);
@@ -174,7 +184,7 @@ export async function parseUserMessage(
     return { content: clarificationContent };
   }
 
-  // ✅ НОВОЕ: Обрабатываем удаление членов
+  // Обрабатываем удаление членов
   if (
     clarificationResult.intent.membersToDelete &&
     clarificationResult.intent.membersToDelete.length > 0
@@ -184,7 +194,6 @@ export async function parseUserMessage(
       clarificationResult.intent.membersToDelete.length
     );
 
-    // Применяем изменения (включая удаление)
     const updateSummary = await applyUpdates({
       intent: clarificationResult.intent,
     });
@@ -253,15 +262,12 @@ export async function parseUserMessage(
 
       return { content: jsonContent };
     } else {
-      // ✅ НОВОЕ: Не использовать aiMessage при добавлении новых членов!
-      // Используем статический текст, чтобы избежать повторного вопроса о бюджете
-      const newMembersNames = clarificationResult.intent.newMembers
+      const newMembersNames = (clarificationResult.intent.newMembers as {name: string}[])
         .map((m) => m.name)
         .join(", ");
 
       let newMembersResponse = `✅ Отлично! ${newMembersNames} теперь в вашей семье.`;
 
-      // Переходим к следующему корректному шагу
       if (nextStep === "likes") {
         newMembersResponse += " Теперь расскажите, какие продукты вы и ваша семья любите?";
       } else if (nextStep === "allergies") {
@@ -278,60 +284,9 @@ export async function parseUserMessage(
     }
   }
 
-  // ✅ Определяем финальный ответ
-  let finalResponse = "";
-
-  // ✅ НОВОЕ: Проверяем, есть ли уже бюджет в profileContext
-  const budgetAlreadySet = profileContext.includes("✅ Бюджет на неделю:");
-
-  // Стандартный flow для остальных шагов
-  if (nextStep === "family") {
-    finalResponse =
-      aiMessage ||
-      "Давайте начнём с семьи. Расскажите, кто входит в вашу семью? Укажите возраст и вес каждого.";
-  } else if (nextStep === "primary_member") {
-    console.log(
-      "⚠️ primary_member step but no new members detected - showing standard selector"
-    );
-    const jsonContent = JSON.stringify({
-      type: "choose_primary_member",
-      message: "Кто будет основным представителем семьи?",
-      members: members.map((m) => ({
-        id: m.id,
-        name: m.name,
-      })),
-    });
-    finalResponse = jsonContent;
-  } else if (nextStep === "budget" && !budgetAlreadySet) {
-    // ✅ ИСПРАВЛЕНО: Спрашиваем бюджет только если его нет
-    finalResponse =
-      aiMessage ||
-      "Теперь расскажите, какой у вас недельный бюджет на питание (в рублях)?";
-  } else if (nextStep === "budget" && budgetAlreadySet) {
-    // ✅ НОВОЕ: Если бюджет уже есть, пропускаем к следующему шагу
-    finalResponse =
-      aiMessage ||
-      "Спасибо за информацию! Переходим к следующему шагу.";
-  } else if (nextStep === "likes") {
-    finalResponse =
-      aiMessage ||
-      "Отлично! Теперь расскажите, какие продукты вы и ваша семья любите?";
-  } else if (nextStep === "allergies") {
-    finalResponse =
-      aiMessage ||
-      "Теперь важно узнать об аллергиях. Есть ли аллергии у кого-нибудь из семьи?";
-  } else if (nextStep === "goals") {
-    finalResponse =
-      aiMessage ||
-      "И последнее — какие у вас цели по питанию? (например: здоровое питание, похудение, набор мышечной массы)";
-  } else if (nextStep === "complete") {
-    finalResponse =
-      aiMessage ||
-      "Спасибо! Все данные собраны. Я готов помочь с планированием питания для вашей семьи!";
-  } else {
-    finalResponse = aiMessage || updateSummary || "Готово.";
-  }
-
+  // Определяем финальный ответ
+  const finalResponse = aiMessage || updateSummary || "Готово.";
+  
   return { content: finalResponse };
 }
 

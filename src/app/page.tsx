@@ -14,6 +14,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import ReactMarkdown from "react-markdown";
 
 type ChatMessage = {
   id: string;
@@ -322,6 +323,12 @@ export default function HomePage() {
                 <div className="h-6 w-1/2 rounded bg-zinc-200"></div>
                 <div className="h-6 w-2/3 rounded bg-zinc-200"></div>
                 <div className="h-6 w-1/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-3/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-2/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-2/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-1/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-2/3 rounded bg-zinc-200"></div>
+                <div className="h-6 w-1/3 rounded bg-zinc-200"></div>
               </div>
             ) : (
               <AnimatePresence>
@@ -343,8 +350,8 @@ export default function HomePage() {
                           : "bg-zinc-100 text-zinc-900"
                       }`}
                     >
-                      <header className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                        {msg.role === "user" ? "Вы" : "AI-помощник"}
+                      <header className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                        {msg.role === "user" ? "Вы" : "AI-помощник 🤖"}
                       </header>
                       <MessageContent
                         msg={msg}
@@ -465,7 +472,11 @@ function MessageContent({
   try {
     parsed = JSON.parse(msg.content);
   } catch {
-    return <p>{msg.content}</p>;
+    return (
+        <div className="markdown-content">
+            <ReactMarkdown>{msg.content}</ReactMarkdown>
+        </div>
+    );
   }
 
   if (parsed && parsed.type === "choose_primary_member") {
@@ -488,5 +499,11 @@ function MessageContent({
     );
   }
 
-  return <p>{msg.content}</p>;
+  // Запасной вариант для других JSON или простого текста в JSON
+  const contentToRender = parsed.content || msg.content || "";
+  return (
+    <div className="markdown-content">
+        <ReactMarkdown>{contentToRender}</ReactMarkdown>
+    </div>
+  );
 }

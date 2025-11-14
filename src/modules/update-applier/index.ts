@@ -1,4 +1,4 @@
-﻿// src\modules\update-applier\index.ts
+﻿// src/modules/update-applier/index.ts
 
 import { getSupabaseServiceRoleClient } from "@/lib/supabase";
 import type { ResolvedIntent } from "@/modules/parser/types";
@@ -34,65 +34,30 @@ function applyListOps(
   toRemove: string[]
 ): string[] {
   const set = new Set((current ?? []).map(canon));
-
-  for (const item of toAdd) {
-    set.add(canon(item));
-  }
-
-  for (const item of toRemove) {
-    set.delete(canon(item));
-  }
-
+  toAdd.forEach(item => set.add(canon(item)));
+  toRemove.forEach(item => set.delete(canon(item)));
   return uniqueSorted(Array.from(set));
 }
 
 function summariseMember(name: string, summary: MemberSummary): string | null {
   const parts: string[] = [];
-
-  if (summary.ageUpdated !== undefined) {
-    parts.push(`обновлён возраст: ${summary.ageUpdated}`);
-  }
-  if (summary.weightUpdated !== undefined) {
-    parts.push(`обновлён вес: ${summary.weightUpdated} кг`);
-  }
-  if (summary.nameUpdated) {
-    parts.push(`обновлено имя: ${summary.nameUpdated}`);
-  }
-
-  if (summary.addedAllergies.length) {
-    parts.push(`добавлены аллергии: ${summary.addedAllergies.join(", ")}`);
-  }
-  if (summary.removedAllergies.length) {
-    parts.push(`удалены аллергии: ${summary.removedAllergies.join(", ")}`);
-  }
-  if (summary.addedLikes.length) {
-    parts.push(`добавлены любимые: ${summary.addedLikes.join(", ")}`);
-  }
-  if (summary.removedLikes.length) {
-    parts.push(`удалены любимые: ${summary.removedLikes.join(", ")}`);
-  }
-  if (summary.addedDislikes.length) {
-    parts.push(`добавлены нелюбимые: ${summary.addedDislikes.join(", ")}`);
-  }
-  if (summary.removedDislikes.length) {
-    parts.push(`удалены нелюбимые: ${summary.removedDislikes.join(", ")}`);
-  }
-
-  if (!parts.length) {
-    return null;
-  }
-
+  if (summary.ageUpdated !== undefined && summary.ageUpdated !== null) parts.push(`обновлён возраст: ${summary.ageUpdated}`);
+  if (summary.weightUpdated !== undefined && summary.weightUpdated !== null) parts.push(`обновлён вес: ${summary.weightUpdated} кг`);
+  if (summary.nameUpdated) parts.push(`обновлено имя: ${summary.nameUpdated}`);
+  if (summary.addedAllergies.length) parts.push(`добавлены аллергии: ${summary.addedAllergies.join(", ")}`);
+  if (summary.removedAllergies.length) parts.push(`удалены аллергии: ${summary.removedAllergies.join(", ")}`);
+  if (summary.addedLikes.length) parts.push(`добавлены любимые продукты: ${summary.addedLikes.join(", ")}`);
+  if (summary.removedLikes.length) parts.push(`удалены любимые продукты: ${summary.removedLikes.join(", ")}`);
+  if (summary.addedDislikes.length) parts.push(`добавлены нелюбимые продукты: ${summary.addedDislikes.join(", ")}`);
+  if (summary.removedDislikes.length) parts.push(`удалены нелюбимые продукты: ${summary.removedDislikes.join(", ")}`);
+  if (!parts.length) return null;
   return `${name}: ${parts.join("; ")}`;
 }
 
 function arraysEqual(a: string[] | null, b: string[] | null): boolean {
-  const aList = (a ?? []).map(canon);
-  const bList = (b ?? []).map(canon);
-
-  if (aList.length !== bList.length) {
-    return false;
-  }
-
+  const aList = uniqueSorted((a ?? []).map(canon));
+  const bList = uniqueSorted((b ?? []).map(canon));
+  if (aList.length !== bList.length) return false;
   return aList.every((value, index) => value === bList[index]);
 }
 
@@ -102,356 +67,167 @@ export async function applyUpdates({
   const supabase = getSupabaseServiceRoleClient();
   const summaryLines: string[] = [];
 
-  // ✅ НОВОЕ: Удаляем членов семьи, если нужно
+  // 1. Удаление членов семьи
   if (intent.membersToDelete && intent.membersToDelete.length > 0) {
     const memberIdsToDelete = intent.membersToDelete.map((m) => m.id);
-
-    const { error: deleteError } = await supabase
-      .from("family_members")
-      .delete()
-      .in("id", memberIdsToDelete);
-
-    if (deleteError) {
-      console.error("❌ Ошибка при удалении членов семьи:", deleteError);
+    const { error } = await supabase.from("family_members").delete().in("id", memberIdsToDelete);
+    if (error) {
+      console.error("❌ Ошибка при удалении членов семьи:", error);
     } else {
-      const memberNames = intent.membersToDelete.map((m) => m.name).join(", ");
-      summaryLines.push(`✅ Удалены члены семьи: ${memberNames}.`);
+      summaryLines.push(`✅ Удалены члены семьи: ${intent.membersToDelete.map((m) => m.name).join(", ")}.`);
     }
   }
 
-  // ✅ НОВОЕ: Создаём новых членов семьи, если они есть
+  // 2. Создание новых членов семьи
   if (intent.newMembers && intent.newMembers.length > 0) {
-    // ✅ Фильтруем только членов с именем
-    const validNewMembers = intent.newMembers.filter(
-      (member) => member.name && typeof member.name === "string"
-    );
-
+    const validNewMembers = intent.newMembers.filter(m => m.name && typeof m.name === "string");
     if (validNewMembers.length > 0) {
-      const newMembersToInsert = validNewMembers.map((member) => ({
+      const newMembersToInsert = validNewMembers.map((m) => ({
         profile_id: intent.profile.id,
-        name: member.name!,  // ✅ Гарантированно string
-        age: member.age ?? null,
-        weight: member.weight ?? null,
-        likes: member.likes ?? [],
-        dislikes: member.dislikes ?? [],
-        allergies: member.allergies ?? [],
+        name: m.name!,
+        age: m.age ?? null,
+        weight: m.weight ?? null,
+        likes: m.likes ?? [],
+        dislikes: m.dislikes ?? [],
+        allergies: m.allergies ?? [],
       }));
-
-      const { error: insertError } = await supabase
-        .from("family_members")
-        .insert(newMembersToInsert);
-
-      if (insertError) {
-        console.error("❌ Ошибка при создании новых членов семьи:", insertError);
+      const { error } = await supabase.from("family_members").insert(newMembersToInsert);
+      if (error) {
+        console.error("❌ Ошибка при создании новых членов семьи:", error);
       } else {
-        const memberNames = newMembersToInsert.map((m) => m.name).join(", ");
-        summaryLines.push(`✅ Добавлены новые члены семьи: ${memberNames}.`);
+        summaryLines.push(`✅ Добавлены новые члены семьи: ${newMembersToInsert.map((m) => m.name).join(", ")}.`);
       }
     }
   }
 
-  const profileUpdates: Partial<ProfileRow> = {};
+  // 3. Обновление данных существующих членов семьи
+  if (intent.updates && intent.updates.length > 0) {
+    const memberIdsToUpdate = Array.from(new Set(intent.updates.flatMap(u => u.memberIds)));
+    const memberMap = new Map<number, FamilyMemberRow>();
 
-  if (intent.budget !== undefined && intent.budget !== null) {
-    console.log("💾 Updating budget:", intent.budget);
-    profileUpdates.budget = intent.budget;
-  } else if (intent.budget === null && intent.profile.budget !== null) {
-    console.log("🛡️ PROTECTED: Not clearing budget (intent.budget is null)");
-  }
+    if (memberIdsToUpdate.length > 0) {
+        const { data: members, error } = await supabase
+            .from("family_members")
+            .select("*")
+            .in("id", memberIdsToUpdate)
+            .returns<FamilyMemberRow[]>();
 
-  if (intent.goals !== undefined && intent.goals !== null) {
-    profileUpdates.goals =
-      intent.goals.length > 0 ? intent.goals.join(", ") : null;
-  }
-
-  if (Object.keys(profileUpdates).length > 0) {
-    const { data: updatedProfile, error } = await supabase
-      .from("profiles")
-      .update(profileUpdates)
-      .eq("id", intent.profile.id)
-      .select()
-      .single();
-
-    if (error || !updatedProfile) {
-      throw error ?? new Error("Failed to update user profile.");
+        if (error) {
+            console.error("❌ Ошибка при загрузке членов семьи для обновления:", error);
+        } else {
+            (members || []).forEach(member => memberMap.set(member.id, member));
+        }
     }
 
-    if (profileUpdates.budget !== undefined) {
-      summaryLines.push(
-        profileUpdates.budget === null
-          ? "Семейный бюджет очищен."
-          : `Обновлён семейный бюджет: ${profileUpdates.budget} ₽.`
-      );
-    }
+    const memberStates = new Map<number, { before: FamilyMemberRow; after: FamilyMemberRow; summary: MemberSummary }>();
 
-    if (profileUpdates.goals !== undefined) {
-      summaryLines.push(
-        profileUpdates.goals && profileUpdates.goals.length
-          ? `Обновлены цели: ${profileUpdates.goals}.`
-          : "Цели очищены."
-      );
-    }
-  }
-
-  const memberMap = new Map<number, FamilyMemberRow>();
-
-  if (
-    intent.profile.family_data &&
-    (intent.profile.family_data as any).primary_member_id
-  ) {
-    const primaryId = (intent.profile.family_data as any).primary_member_id;
-
-    const { data: primaryMember } = await supabase
-      .from("family_members")
-      .select("*")
-      .eq("id", primaryId)
-      .maybeSingle() as unknown as {
-        data: FamilyMemberRow | null;
-        error: any;
-      };
-
-    if (primaryMember) {
-      memberMap.set(primaryId, primaryMember);
-    }
-  }
-
-  for (const member of intent.familyMembers) {
-    memberMap.set(member.id, member);
-  }
-
-  const memberStates = new Map<
-    number,
-    {
-      before: FamilyMemberRow;
-      after: FamilyMemberRow;
-      summary: MemberSummary;
-    }
-  >();
-
-  const ensureMemberState = (memberId: number) => {
-    let state = memberStates.get(memberId);
-    if (state) {
-      return state;
-    }
-
-    const base = memberMap.get(memberId);
-    if (!base) {
-      return null;
-    }
-
-    state = {
-      before: base,
-      after: { ...base },
-      summary: {
-        addedAllergies: [],
-        removedAllergies: [],
-        addedLikes: [],
-        removedLikes: [],
-        addedDislikes: [],
-        removedDislikes: [],
-      },
+    const ensureMemberState = (memberId: number) => {
+        if (memberStates.has(memberId)) return memberStates.get(memberId);
+        const base = memberMap.get(memberId);
+        if (!base) {
+            console.warn(`⚠️ Не удалось найти состояние для memberId: ${memberId}`);
+            return null;
+        }
+        const state = {
+            before: base,
+            after: { ...base },
+            summary: { addedAllergies: [], removedAllergies: [], addedLikes: [], removedLikes: [], addedDislikes: [], removedDislikes: [] },
+        };
+        memberStates.set(memberId, state);
+        return state;
     };
 
-    memberStates.set(memberId, state);
-    return state;
-  };
+    for (const update of intent.updates) {
+        for (const memberId of update.memberIds) {
+            const state = ensureMemberState(memberId);
+            if (!state) continue;
 
-  if (
-    intent.familyMembers &&
-    intent.familyMembers.length > 0 &&
-    intent.profile.family_data &&
-    (intent.profile.family_data as any).primary_member_id
-  ) {
-    const primaryId = (intent.profile.family_data as any).primary_member_id;
+            const { after } = state;
+            if ((update as any).nameUpdate) after.name = (update as any).nameUpdate;
 
-    const directMember = intent.familyMembers.find(
-      (m) =>
-        ["я", "мне", "меня", "мой", "моя", "мои", "пользователь"].includes(
-          m.name.trim().toLowerCase()
-        )
-    );
+            // 1. Применяем базовые операции
+            const nextLikes = applyListOps(after.likes, update.operations.add_likes, update.operations.remove_likes);
+            const nextDislikes = applyListOps(after.dislikes, update.operations.add_dislikes, update.operations.remove_dislikes);
 
-    if (directMember) {
-      const updates = {
-        age: directMember.age ?? null,
-        weight: directMember.weight ?? null,
-      };
+            // 2. Обеспечиваем взаимоисключаемость
+            // Если что-то добавили в likes, удаляем это из dislikes
+            update.operations.add_likes.forEach(item => {
+                const canonItem = canon(item);
+                const index = nextDislikes.indexOf(canonItem);
+                if (index > -1) {
+                    nextDislikes.splice(index, 1);
+                }
+            });
+            
+            // Если что-то добавили в dislikes, удаляем это из likes
+            update.operations.add_dislikes.forEach(item => {
+                const canonItem = canon(item);
+                const index = nextLikes.indexOf(canonItem);
+                if (index > -1) {
+                    nextLikes.splice(index, 1);
+                }
+            });
+            
+            after.likes = nextLikes;
+            after.dislikes = nextDislikes;
+            
+            // Аллергии остаются без изменений в этой логике
+            after.allergies = applyListOps(after.allergies, update.operations.add_allergies, update.operations.remove_allergies);
+            
+            if (update.operations.age !== undefined && update.operations.age !== null) after.age = update.operations.age;
+            if (update.operations.weight !== undefined && update.operations.weight !== null) after.weight = update.operations.weight;
+        }
+    }
 
-      const { error } = await supabase
-        .from("family_members")
-        .update(updates)
-        .eq("id", primaryId);
+    for (const [memberId, state] of memberStates.entries()) {
+        const { before, after } = state;
+        const changed = !arraysEqual(before.allergies, after.allergies) || !arraysEqual(before.likes, after.likes) || !arraysEqual(before.dislikes, after.dislikes) || before.age !== after.age || before.weight !== after.weight || before.name !== after.name;
 
+        if (changed) {
+            const { error } = await supabase.from("family_members").update({ ...after }).eq("id", memberId);
+            if (error) {
+                console.error(`❌ Ошибка при обновлении memberId ${memberId}:`, error);
+            } else {
+                const summary: MemberSummary = {
+                    ageUpdated: before.age !== after.age ? after.age : undefined,
+                    weightUpdated: before.weight !== after.weight ? after.weight : undefined,
+                    nameUpdated: before.name !== after.name ? after.name : undefined,
+                    addedAllergies: (after.allergies ?? []).filter(item => !(before.allergies ?? []).map(canon).includes(canon(item))),
+                    removedAllergies: (before.allergies ?? []).filter(item => !(after.allergies ?? []).map(canon).includes(canon(item))),
+                    addedLikes: (after.likes ?? []).filter(item => !(before.likes ?? []).map(canon).includes(canon(item))),
+                    removedLikes: (before.likes ?? []).filter(item => !(after.likes ?? []).map(canon).includes(canon(item))),
+                    addedDislikes: (after.dislikes ?? []).filter(item => !(before.dislikes ?? []).map(canon).includes(canon(item))),
+                    removedDislikes: (before.dislikes ?? []).filter(item => !(after.dislikes ?? []).map(canon).includes(canon(item))),
+                };
+                const line = summariseMember(after.name, summary);
+                if (line) summaryLines.push(line);
+            }
+        }
+    }
+  }
+
+
+  // 4. Обновление профиля (бюджет, цели)
+  const profileUpdates: Partial<ProfileRow> = {};
+  if (intent.budget !== undefined && intent.budget !== null) {
+      profileUpdates.budget = intent.budget;
+  }
+  if (intent.goals !== undefined && intent.goals !== null) {
+      profileUpdates.goals = intent.goals.length > 0 ? intent.goals.join(", ") : null;
+  }
+  
+  if (Object.keys(profileUpdates).length > 0) {
+      const { error } = await supabase.from("profiles").update(profileUpdates).eq("id", intent.profile.id);
       if (error) {
-        console.error("Ошибка при прямом обновлении primary_member:", error);
+          console.error("❌ Ошибка при обновлении профиля:", error);
       } else {
-        if (updates.age !== null)
-          summaryLines.push(`Обновлён возраст: ${updates.age} лет.`);
-        if (updates.weight !== null)
-          summaryLines.push(`Обновлён вес: ${updates.weight} кг.`);
+          if (profileUpdates.budget !== undefined) summaryLines.push(profileUpdates.budget === null ? "Семейный бюджет очищен." : `Обновлён семейный бюджет: ${profileUpdates.budget} ₽.`);
+          if (profileUpdates.goals !== undefined) summaryLines.push(profileUpdates.goals && profileUpdates.goals.length ? `Обновлены цели: ${profileUpdates.goals}.` : "Цели очищены.");
       }
-    }
-  }
-
-  for (const update of intent.updates) {
-    for (const memberId of update.memberIds) {
-      const state = ensureMemberState(memberId);
-      if (!state) {
-        continue;
-      }
-
-      const { after, summary } = state;
-
-      // ✅ НОВОЕ: Обновляем имя, если оно указано в nameUpdate
-      if ((update as any).nameUpdate) {
-        after.name = (update as any).nameUpdate;
-        summary.nameUpdated = (update as any).nameUpdate;
-        console.log("📝 Updated name to:", after.name);
-      }
-
-      const currentAllergies = applyListOps(after.allergies ?? [], [], []);
-      const currentLikes = applyListOps(after.likes ?? [], [], []);
-      const currentDislikes = applyListOps(after.dislikes ?? [], [], []);
-
-      const nextAllergies = applyListOps(
-        currentAllergies,
-        update.operations.add_allergies,
-        update.operations.remove_allergies
-      );
-      const nextLikes = applyListOps(
-        currentLikes,
-        update.operations.add_likes,
-        update.operations.remove_likes
-      );
-      const nextDislikes = applyListOps(
-        currentDislikes,
-        update.operations.add_dislikes,
-        update.operations.remove_dislikes
-      );
-
-      const addedAllergies = nextAllergies.filter(
-        (item) => !currentAllergies.includes(item)
-      );
-      const removedAllergies = currentAllergies.filter(
-        (item) => !nextAllergies.includes(item)
-      );
-      const addedLikes = nextLikes.filter(
-        (item) => !currentLikes.includes(item)
-      );
-      const removedLikes = currentLikes.filter(
-        (item) => !nextLikes.includes(item)
-      );
-      const addedDislikes = nextDislikes.filter(
-        (item) => !currentDislikes.includes(item)
-      );
-      const removedDislikes = currentDislikes.filter(
-        (item) => !nextDislikes.includes(item)
-      );
-
-      summary.addedAllergies.push(...addedAllergies);
-      summary.removedAllergies.push(...removedAllergies);
-      summary.addedLikes.push(...addedLikes);
-      summary.removedLikes.push(...removedLikes);
-      summary.addedDislikes.push(...addedDislikes);
-      summary.removedDislikes.push(...removedDislikes);
-
-      after.allergies = nextAllergies;
-      after.likes = nextLikes;
-      after.dislikes = nextDislikes;
-
-      if (
-        update.operations.age !== undefined &&
-        update.operations.age !== null
-      ) {
-        after.age = update.operations.age;
-        summary.ageUpdated = update.operations.age;
-      }
-      if (
-        update.operations.weight !== undefined &&
-        update.operations.weight !== null
-      ) {
-        after.weight = update.operations.weight;
-        summary.weightUpdated = update.operations.weight;
-      }
-    }
-  }
-
-  const memberUpdates: {
-    id: number;
-    profile_id: number;
-    name: string;
-    allergies: string[];
-    likes: string[];
-    dislikes: string[];
-    age: number | null;
-    weight: number | null;
-  }[] = [];
-
-  for (const [memberId, state] of memberStates.entries()) {
-    const changedAllergies = !arraysEqual(
-      state.before.allergies,
-      state.after.allergies
-    );
-    const changedLikes = !arraysEqual(state.before.likes, state.after.likes);
-    const changedDislikes = !arraysEqual(
-      state.before.dislikes,
-      state.after.dislikes
-    );
-    const changedAge = state.before.age !== state.after.age;
-    const changedWeight = state.before.weight !== state.after.weight;
-    const changedName = state.before.name !== state.after.name;
-
-    if (
-      !changedAllergies &&
-      !changedLikes &&
-      !changedDislikes &&
-      !changedAge &&
-      !changedWeight &&
-      !changedName
-    ) {
-      continue;
-    }
-
-    memberUpdates.push({
-      id: memberId,
-      profile_id: state.after.profile_id,
-      name: state.after.name,
-      allergies: state.after.allergies ?? [],
-      likes: state.after.likes ?? [],
-      dislikes: state.after.dislikes ?? [],
-      age: state.after.age ?? null,
-      weight: state.after.weight ?? null,
-    });
-
-    const line = summariseMember(state.after.name, {
-      addedAllergies: uniqueSorted(state.summary.addedAllergies),
-      removedAllergies: uniqueSorted(state.summary.removedAllergies),
-      addedLikes: uniqueSorted(state.summary.addedLikes),
-      removedLikes: uniqueSorted(state.summary.removedLikes),
-      addedDislikes: uniqueSorted(state.summary.addedDislikes),
-      removedDislikes: uniqueSorted(state.summary.removedDislikes),
-      ageUpdated: state.summary.ageUpdated,
-      weightUpdated: state.summary.weightUpdated,
-      nameUpdated: state.summary.nameUpdated,
-    });
-
-    if (line) {
-      summaryLines.push(line);
-    }
-  }
-
-  if (memberUpdates.length > 0) {
-    const { error: memberUpdateError } = await supabase
-      .from("family_members")
-      .upsert(memberUpdates, { onConflict: "id" });
-
-    if (memberUpdateError) {
-      throw memberUpdateError;
-    }
   }
 
   if (summaryLines.length === 0) {
-    summaryLines.push("Изменений не обнаружено.");
+    return "Я всё понял, но, кажется, никаких изменений не потребовалось.";
   }
 
   return summaryLines.join("\n");

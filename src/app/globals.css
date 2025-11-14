@@ -24,3 +24,18 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.markdown-content p {
+  margin-bottom: .5rem; /* Добавляем отступ после каждого абзаца (например, после "Ольга (32 года...)") */
+}
+.markdown-content p:last-child {margin-bottom: 0}
+
+.markdown-content ul {
+  list-style-type: disc; /* Возвращаем стандартные кружочки для списка */
+  padding-left: 2rem; /* Добавляем отступ слева для всего списка */
+  margin-top: .1rem; /* Небольшой отступ сверху списка */
+}
+
+.markdown-content li {
+  margin-bottom: 0.25rem; /* Небольшой отступ между элементами списка */
+}
